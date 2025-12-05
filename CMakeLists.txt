@@ -118,7 +118,7 @@ target_link_libraries(synthesizer PRIVATE utils cost config)
 add_llvm_library(online MODULE "pass/online.cpp")
 
 target_link_libraries(online
-  PRIVATE synthesizer slice ${ALIVE_LIBS} ${Z3_LIBRARIES} ${LLVM_LIBS})
+  PRIVATE synthesizer slice ${ALIVE_LIBS} ${Z3_LIBRARIES} ${LLVM_LIBS} ${ALIVE2_SOURCE_DIR}/build/libir.a)
 
 # add_llvm_executable(minotaur-cs "tools/minotaur-cs.cpp")
 
