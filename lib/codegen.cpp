@@ -5,6 +5,7 @@
 
 #include "ir/instr.h"
 
+#include "llvm-c/Core.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/GlobalValue.h"
@@ -429,6 +430,27 @@ LLVMGen::codeGenImpl(Inst *I, ValueToValueMapTy &VMap) {
     auto op1 = codeGenImpl(S->R(), VMap);
     op1 = bitcastTo(op1, S->getType().toLLVM(C));
     return b.CreateSelect(cond, op0, op1, "sel");
+  } else if (auto A = dynamic_cast<ABM*>(I)) {
+    if (A->getType().isFP() || A->getType().isVector())
+      report_fatal_error("ABM expects integer scalar types");
+    
+    unsigned elemBits = A->getType().getBits();
+    uint64_t matBits = static_cast<uint64_t>(elemBits) * elemBits;
+    Type *elemTy = Type::getIntNTy(C, elemBits);
+    Type *matTy  = Type::getIntNTy(C, matBits);
+
+    FunctionType *FT = FunctionType::get(elemTy, {elemTy, matTy, elemTy}, false);
+    FunctionCallee Callee = M->getOrInsertFunction("ABM", FT);
+    
+    auto a0 = bitcastTo(codeGenImpl(A->X(), VMap), elemTy);
+    auto a1 = bitcastTo(codeGenImpl(A->M(), VMap), matTy);
+    auto a2 = bitcastTo(codeGenImpl(A->B(), VMap), elemTy);
+
+    CallInst *CI = b.CreateCall(Callee, {a0, a1, a2});
+    if (auto *F = dyn_cast<Function>(Callee.getCallee()))
+      IntrinsicDecls.insert(F); // so removeUnusedDecls can clean up
+
+    return CI;
   }
   llvm::report_fatal_error("[ERROR] unknown instruction found in LLVMGen");
 }

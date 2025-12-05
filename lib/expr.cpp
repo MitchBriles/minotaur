@@ -294,6 +294,15 @@ void Select::print(raw_ostream &os) const {
   os << ")";
 }
 
+void ABM::print(raw_ostream &os) const {
+  os << "(ABM ";
+  x_->print(os);
+  os << " ";
+  M_->print(os);
+  os << " ";
+  b_->print(os);
+  os << ")";
+}
 
 vector<type> getUnaryOpWorkTypes(type ty, UnaryOp::Op op) {
   if (UnaryOp::isFloatingPoint(op)) {

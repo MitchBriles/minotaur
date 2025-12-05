@@ -284,6 +284,18 @@ public:
   Value *R() { return rhs; }
 };
 
+class ABM final : public Value {
+  Value *x_;
+  Value *M_;
+  Value *b_;
+public:
+  ABM(Value &x, Value &M, Value &b)
+  : Value(x.getType()), x_(&x), M_(&M), b_(&b) {}
+  void print(llvm::raw_ostream &os) const override;
+  Value *X() { return x_; }
+  Value *M() { return M_; }
+  Value *B() { return b_; }
+};
 
 struct Rewrite {
   Inst *I;

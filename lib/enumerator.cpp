@@ -39,6 +39,7 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Support/KnownBits.h"
 
+#include <cstdint>
 #include <algorithm>
 #include <iostream>
 #include <memory>
@@ -46,6 +47,7 @@
 #include <vector>
 #include <set>
 #include <map>
+#include <limits>
 
 using namespace tools;
 using namespace util;
@@ -309,6 +311,74 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
           auto BO = make_unique<BinaryOp>(Op, *I, *J, workty);
           sketches.push_back(make_pair(BO.get(), std::move(RCs)));
           exprs.emplace_back(std::move(BO));
+        }
+      }
+    }
+  }
+
+  // ABM: rhs expected to be integer scalar, matrix operand is width^2
+  if (!expected.isFP() && expected.getLane() == 1) {
+    uint64_t matBits = uint64_t(expected.getBits()) * expected.getBits();
+    if (matBits <= std::numeric_limits<unsigned>::max()) {
+      type matTy = type::Integer(static_cast<unsigned>(matBits));
+      auto addAbm = [&](Value *X, Value *M, Value *B,
+                        set<ReservedConst*> RCs) {
+        auto abm = make_unique<ABM>(*X, *M, *B);
+        sketches.push_back(make_pair(abm.get(), std::move(RCs)));
+        exprs.emplace_back(std::move(abm));
+      };
+
+      // collect B candidates (existing values + fresh constant)
+      vector<pair<Value*, set<ReservedConst*>>> bCandidates;
+      for (auto B : Comps) {
+        auto bty = B->getType();
+        if (!bty.isValid() || bty.isFP() || bty.isVector())
+          continue;
+        if (!bty.same_width(expected))
+          continue;
+        bCandidates.push_back({B, {}});
+      }
+      {
+        auto T = make_unique<ReservedConst>(expected);
+        auto *BConst = T.get();
+        set<ReservedConst*> RCs;
+        RCs.insert(BConst);
+        bCandidates.push_back({BConst, RCs});
+        exprs.emplace_back(std::move(T));
+      }
+
+      // collect M candidates (existing values + fresh constant)
+      vector<pair<Value*, set<ReservedConst*>>> m_candidates;
+      for (auto M : Comps) {
+        auto mty = M->getType();
+        if (!mty.isValid() || mty.isFP() || mty.isVector())
+          continue;
+        if (!mty.same_width(matTy))
+          continue;
+        m_candidates.push_back({M, {}});
+      }
+      {
+        auto T = make_unique<ReservedConst>(matTy);
+        auto *MConst = T.get();
+        set<ReservedConst*> RCs;
+        RCs.insert(MConst);
+        m_candidates.push_back({MConst, RCs});
+        exprs.emplace_back(std::move(T));
+      }
+
+      for (auto X : Comps) {
+        auto xty = X->getType();
+        if (!xty.isValid() || xty.isFP() || xty.isVector())
+          continue;
+        if (!xty.same_width(expected))
+          continue;
+
+        for (auto &[BVal, b_rcs] : bCandidates) {
+          for (auto &[MVal, m_rcs] : m_candidates) {
+            set<ReservedConst*> RCs = b_rcs;
+            RCs.insert(m_rcs.begin(), m_rcs.end());
+            addAbm(X, MVal, BVal, std::move(RCs));
+          }
         }
       }
     }
