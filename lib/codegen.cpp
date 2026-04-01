@@ -438,7 +438,12 @@ LLVMGen::codeGenImpl(Inst *I, ValueToValueMapTy &VMap) {
 
     FunctionType *FT = FunctionType::get(elemTy, {elemTy, matTy, elemTy}, false);
     FunctionCallee Callee = M->getOrInsertFunction("ABM", FT);
-    
+    if (auto *F = dyn_cast<Function>(Callee.getCallee())) {
+      F->setDoesNotAccessMemory();
+      F->setDoesNotThrow();
+      F->addFnAttr(Attribute::WillReturn);
+    }
+
     auto a0 = bitcastTo(codeGenImpl(A->X(), VMap), elemTy);
     auto a1 = bitcastTo(codeGenImpl(A->M(), VMap), matTy);
     auto a2 = bitcastTo(codeGenImpl(A->B(), VMap), elemTy);

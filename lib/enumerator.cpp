@@ -13,12 +13,14 @@
 #include "llvm_util/llvm2alive.h"
 #include "llvm_util/utils.h"
 
+#include "llvm/ADT/APInt.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/CGSCCPassManager.h"
 #include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
+#include "llvm/IR/Constant.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/IR/Function.h"
@@ -348,7 +350,8 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
         m_candidates.push_back({M, {}});
       }
       {
-        auto T = make_unique<ReservedConst>(matTy);
+        // auto *MVal = llvm::Constant::getIntegerValue(matTy.toLLVM(V->getContext()), llvm::APInt(matBits, 9078117754732544L));
+        auto T = make_unique<ReservedConst>(matTy/*, MVal*/);
         auto *MConst = T.get();
         set<ReservedConst*> RCs;
         RCs.insert(MConst);
@@ -365,9 +368,32 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
 
         for (auto &[BVal, b_rcs] : bCandidates) {
           for (auto &[MVal, m_rcs] : m_candidates) {
-            set<ReservedConst*> RCs = b_rcs;
-            RCs.insert(m_rcs.begin(), m_rcs.end());
-            addAbm(X, MVal, BVal, std::move(RCs));
+            set<ReservedConst*> RCs;
+
+            // Clone reserved constants so each sketch owns its own copy and
+            // later constant synthesis can't overwrite shared state across
+            // different ABM candidates.
+            Value *BUse = BVal;
+            if (auto *BRC = dynamic_cast<ReservedConst*>(BVal)) {
+              auto T = make_unique<ReservedConst>(BRC->getType());
+              BUse = T.get();
+              RCs.insert(T.get());
+              exprs.emplace_back(std::move(T));
+            } else {
+              RCs.insert(b_rcs.begin(), b_rcs.end());
+            }
+
+            Value *MUse = MVal;
+            if (auto *MRC = dynamic_cast<ReservedConst*>(MVal)) {
+              auto T = make_unique<ReservedConst>(MRC->getType());
+              MUse = T.get();
+              RCs.insert(T.get());
+              exprs.emplace_back(std::move(T));
+            } else {
+              RCs.insert(m_rcs.begin(), m_rcs.end());
+            }
+
+            addAbm(X, MUse, BUse, std::move(RCs));
           }
         }
       }
@@ -957,7 +983,9 @@ push:
         }
       }
 
-      unsigned costAfter = get_machine_cost(Tgt);
+      unsigned costAfter = config::ignore_machine_cost
+                             ? tgt_cost
+                             : get_machine_cost(Tgt);
 
       debug() << "[enumerator] optimized ir (uops=" << costAfter <<")"
               << ", original cost (uops=" << costBefore << "), \n"

@@ -164,17 +164,26 @@ Slice::extractExpr(Value &v) {
           debug() << "[slicer] unknown callee \n";
           continue;
         }
-        if (!callee->isIntrinsic()) {
+        bool isKnown = callee->isIntrinsic() ||
+                       callee->getName().starts_with("ABM");
+        if (!isKnown) {
           debug() << "[slicer] non-intrinsic call: "
                   << callee->getName() << "\n";
           continue;
         }
 
-        FunctionCallee intrindecl =
+        FunctionCallee decl =
             m->getOrInsertFunction(callee->getName(), callee->getFunctionType(),
                                    callee->getAttributes());
+        if (auto *F = dyn_cast<Function>(decl.getCallee())) {
+          if (callee->getName().starts_with("ABM")) {
+            F->setDoesNotAccessMemory();
+            F->setDoesNotThrow();
+            F->addFnAttr(Attribute::WillReturn);
+          }
+        }
 
-        vmap[callee] = intrindecl.getCallee();
+        vmap[callee] = decl.getCallee();
         ops = call->args();
       } else if (auto phi = dyn_cast<PHINode>(i)) {
         bool phiHasUnknownIncome = false;
