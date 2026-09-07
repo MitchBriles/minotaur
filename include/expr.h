@@ -2,6 +2,7 @@
 // Distributed under the MIT license that can be found in the LICENSE file.
 #pragma once
 
+#include "abm-log.h"
 #include "type.h"
 
 #include "llvm/IR/Argument.h"
@@ -404,6 +405,8 @@ struct Rewrite {
   Inst *I;
   unsigned CostAfter;
   unsigned CostBefore;
+  // ABM calls in this rewrite, harvested before the target function is erased
+  std::vector<ABMUse> ABMs;
 };
 
 std::vector<type> getBinaryOpWorkTypes(type expected, BinaryOp::Op op);

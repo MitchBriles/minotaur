@@ -1,5 +1,6 @@
 // Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
 // Distributed under the MIT license that can be found in the LICENSE file.
+#include "abm-log.h"
 #include "config.h"
 #include "enumerator.h"
 #include "codegen.h"
@@ -446,6 +447,15 @@ final:
     eliminate_dead_code(F);
   }
 
+  // Record the ABM calls that survived into the finished function. Doing this
+  // after DCE rather than per-rewrite means a matrix that a later rewrite
+  // folded into a wider one is not counted alongside its own replacement.
+  if (changed && !abm_log.empty()) {
+    vector<ABMUse> uses;
+    collectABMUses(F, uses, &LI, BFI);
+    writeABMRecords(uses, "accepted", original_ir, -1, -1);
+  }
+
   if (enable_caching) {
     redisFree(ctx);
   }
@@ -521,7 +531,9 @@ struct SuperoptimizerPass : llvm::detail::PassInfoMixin<SuperoptimizerPass> {
     DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
     // MemoryDependenceResults &MD = FAM.getResult<MemoryDependenceAnalysis>(F);
     TargetLibraryInfoWrapperPass TLI(Triple(F.getParent()->getTargetTriple()));
-    optimize_function(F, LI, DT, TLI);
+    // used only to weight logged ABM sites by expected execution frequency
+    BlockFrequencyInfo &BFI = FAM.getResult<BlockFrequencyAnalysis>(F);
+    optimize_function(F, LI, DT, TLI, &BFI);
     return PA;
   }
 };

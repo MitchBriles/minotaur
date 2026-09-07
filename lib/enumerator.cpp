@@ -1,6 +1,7 @@
 // Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
 // Distributed under the MIT license that can be found in the LICENSE file.
 #include "alive-interface.h"
+#include "abm-log.h"
 #include "config.h"
 #include "enumerator.h"
 #include "expr.h"
@@ -1010,6 +1011,9 @@ push:
       } else if (config::ignore_machine_cost || costAfter < costBefore) {
         debug () << "[enumerator] successfully synthesized rhs\n";
         ret.emplace_back(R, costAfter, costBefore);
+        // harvest ABM matrices now; Tgt is erased at the end of this iteration
+        if (config::abm_log_all && !config::abm_log_path.empty())
+          collectABMUses(*Tgt, ret.back().ABMs);
       } else {
         debug() << "[enumerator] successfully synthesized rhs, "
                 << "however, rhs is more expensive than lhs\n";
@@ -1052,6 +1056,18 @@ push:
   for (auto &R : ret) {
     debug() << "[enumerator] rewrite: " << *R.I
             << ", cost="<<  R.CostAfter << "\n";
+  }
+
+  // Log the verified ABM rewrites for this cut. ret[0] is the one that will be
+  // applied; it is logged from the finished function in optimize_function
+  // instead, so that superseded intermediates don't pollute the ranking.
+  if (config::abm_log_all && !config::abm_log_path.empty()) {
+    string cutIR;
+    llvm::raw_string_ostream cs(cutIR);
+    cs << F;
+    cs.flush();
+    for (auto &R : ret)
+      writeABMRecords(R.ABMs, "candidate", cutIR, R.CostBefore, R.CostAfter);
   }
 
   removeUnusedDecls(IntrinsicDecls);
