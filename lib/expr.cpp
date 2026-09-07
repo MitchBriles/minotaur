@@ -285,7 +285,7 @@ void Select::print(raw_ostream &os) const {
 }
 
 void ABM::print(raw_ostream &os) const {
-  os << "(ABM ";
+  os << "(" << fnName() << " ";
   x_->print(os);
   os << " ";
   M_->print(os);

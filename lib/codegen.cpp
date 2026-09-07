@@ -438,7 +438,7 @@ LLVMGen::codeGenImpl(Inst *I, ValueToValueMapTy &VMap) {
     Type *matTy  = Type::getIntNTy(C, matBits);
 
     FunctionType *FT = FunctionType::get(elemTy, {elemTy, matTy, elemTy}, false);
-    FunctionCallee Callee = M->getOrInsertFunction("ABM", FT);
+    FunctionCallee Callee = M->getOrInsertFunction(A->fnName(), FT);
     if (auto *F = dyn_cast<Function>(Callee.getCallee())) {
       F->setDoesNotAccessMemory();
       F->setDoesNotThrow();

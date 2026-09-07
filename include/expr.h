@@ -380,16 +380,24 @@ public:
 };
 
 class ABM final : public Value {
+public:
+  // how the bit-matrix product sums its intermediate terms
+  enum Op { OR, XOR };
+private:
   Value *x_;
   Value *M_;
   Value *b_;
+  Op op_;
 public:
-  ABM(Value &x, Value &M, Value &b)
-  : Value(x.getType()), x_(&x), M_(&M), b_(&b) {}
+  ABM(Value &x, Value &M, Value &b, Op op = OR)
+  : Value(x.getType()), x_(&x), M_(&M), b_(&b), op_(op) {}
   void print(llvm::raw_ostream &os) const override;
   Value *X() { return x_; }
   Value *M() { return M_; }
   Value *B() { return b_; }
+  Op K() const { return op_; }
+  // the LLVM function this lowers to
+  const char *fnName() const { return op_ == XOR ? "ABMX" : "ABM"; }
 };
 
 struct Rewrite {
