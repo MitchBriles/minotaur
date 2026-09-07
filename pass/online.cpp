@@ -49,6 +49,7 @@
 
 #include "hiredis.h"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -74,6 +75,13 @@ llvm::cl::opt<unsigned> slice_to(
     "minotaur-slice-to",
     llvm::cl::desc("minotaur: timeout per slice"),
     llvm::cl::init(900), llvm::cl::value_desc("s"));
+
+llvm::cl::opt<unsigned> function_to(
+    "minotaur-function-to",
+    llvm::cl::desc("minotaur: timeout per function, 0 to disable. Without "
+                   "this one hot function can consume the whole budget for a "
+                   "translation unit and later functions are never reached"),
+    llvm::cl::init(0), llvm::cl::value_desc("s"));
 
 llvm::cl::opt<bool> abm_extract(
     "minotaur-abm-extract",
@@ -408,8 +416,26 @@ optimize_function(llvm::Function &F, LoopInfo &LI, DominatorTree &DT,
     retI->replaceAllUsesWith(V);
     changed = true;
   } else {
+    // A single hot function can otherwise consume the entire per-file budget,
+    // leaving later functions in the translation unit unvisited.
+    auto fn_start = std::chrono::steady_clock::now();
+    bool fn_timeout = false;
+
     for (auto &BB : F) {
+      if (fn_timeout)
+        break;
       for (auto &I : make_early_inc_range(BB)) {
+        if (function_to) {
+          auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                             std::chrono::steady_clock::now() - fn_start)
+                             .count();
+          if ((unsigned)elapsed >= function_to) {
+            debug() << "[online] function timeout after " << elapsed
+                    << "s, skipping rest of " << F.getName() << "\n";
+            fn_timeout = true;
+            break;
+          }
+        }
         if (I.getType()->isVoidTy())
           continue;
 
