@@ -27,6 +27,7 @@
 #include <map>
 #include <optional>
 #include <queue>
+#include <set>
 
 using namespace llvm;
 using namespace std;
@@ -301,11 +302,8 @@ Slice::extractExpr(Value &v) {
   for (BasicBlock *bb : blocks) {
     Instruction *term = bb->getTerminator();
 
-    if (!isa<BranchInst>(term))
-      continue;
-    BranchInst *bi = cast<BranchInst>(term);
-
-    if (!bi->isConditional())
+    auto *bi = dyn_cast<CondBrInst>(term);
+    if (!bi)
       continue;
 
     Value *cond = bi->getCondition();
@@ -342,15 +340,12 @@ Slice::extractExpr(Value &v) {
   // pass 2
   for (BasicBlock *orig_bb : blocks) {
     Instruction *term = orig_bb->getTerminator();
-    if (!isa<BranchInst>(term) && !isa<ReturnInst>(term))
+    if (!isa<UncondBrInst>(term) && !isa<CondBrInst>(term) &&
+        !isa<ReturnInst>(term))
       return nullopt;
 
-    if (!isa<BranchInst>(term))
-      continue;
-    BranchInst *bi = cast<BranchInst>(term);
-
     // skip if condition of a branch is a ConstantExpr
-    if (bi->isConditional()) {
+    if (auto *bi = dyn_cast<CondBrInst>(term)) {
       if (isa<ConstantExpr>(bi->getCondition()))
         return nullopt;
     }
@@ -404,7 +399,7 @@ Slice::extractExpr(Value &v) {
     for (BasicBlock *orig_bb : blocks) {
       if (orig_bb == vbb)
         continue;
-      BranchInst *bi = cast<BranchInst>(orig_bb->getTerminator());
+      Instruction *term = orig_bb->getTerminator();
       Loop *loopbb = LI.getLoopFor(orig_bb);
 
       // harvesting blocks for phis may bring in loops, we untie those loops.
@@ -413,8 +408,8 @@ Slice::extractExpr(Value &v) {
         header = loopbb->getHeader();
       }
 
-      BranchInst *cloned_bi = nullptr;
-      if (bi->isConditional()) {
+      Instruction *cloned_bi = nullptr;
+      if (auto *bi = dyn_cast<CondBrInst>(term)) {
         BasicBlock *truebb = nullptr, *falsebb = nullptr;
         if (bmap.count(bi->getSuccessor(0)) && bi->getSuccessor(0) != header)
           truebb = bmap.at(bi->getSuccessor(0));
@@ -424,18 +419,21 @@ Slice::extractExpr(Value &v) {
           falsebb = bmap.at(bi->getSuccessor(1));
         else
           falsebb = sinkbb;
-        cloned_bi = BranchInst::Create(truebb, falsebb,
-                                       bi->getCondition(), bmap.at(orig_bb));
+        cloned_bi = CondBrInst::Create(bi->getCondition(), truebb, falsebb,
+                                        bmap.at(orig_bb));
+        insts.insert(bi);
+        vmap[bi] = cloned_bi;
       } else {
+        auto *ubi = cast<UncondBrInst>(term);
         BasicBlock *jumpbb = sinkbb;
-        if (bi->getSuccessor(0) != header)
-          jumpbb = bmap.at(bi->getSuccessor(0));
-        cloned_bi = BranchInst::Create(jumpbb, bmap.at(orig_bb));
+        if (ubi->getSuccessor(0) != header)
+          jumpbb = bmap.at(ubi->getSuccessor(0));
+        cloned_bi = UncondBrInst::Create(jumpbb, bmap.at(orig_bb));
+        insts.insert(ubi);
+        vmap[ubi] = cloned_bi;
       }
-      insts.insert(bi);
       cloned_insts.push_back(cloned_bi);
       //bb_insts[orig_bb].push_back(bi);
-      vmap[bi] = cloned_bi;
     }
 
     // create ret

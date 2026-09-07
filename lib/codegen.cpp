@@ -12,6 +12,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/IntrinsicsX86.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/Type.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -116,13 +117,13 @@ LLVMGen::codeGenImpl(Inst *I, ValueToValueMapTy &VMap) {
     default: UNREACHABLE();
     }
 
-    CallInst *CI = nullptr;
+    llvm::Value *CI = nullptr;
     if (K == UnaryOp::ctlz || K == UnaryOp::cttz) {
       CI = b.CreateIntrinsic(lty, iid, {op0, b.getFalse()});
     } else {
       CI = b.CreateIntrinsic(lty, iid, {op0});
     }
-    IntrinsicDecls.insert(CI->getCalledFunction());
+    IntrinsicDecls.insert(cast<CallInst>(CI)->getCalledFunction());
     return CI;
   } else if (auto U = dynamic_cast<Copy*>(I)) {
     auto op0 = codeGenImpl(U->V(), VMap);
@@ -198,8 +199,8 @@ LLVMGen::codeGenImpl(Inst *I, ValueToValueMapTy &VMap) {
     default: break;
     }
     if (iid) {
-      CallInst *C = b.CreateIntrinsic(lty, iid, {op0, op1});
-      IntrinsicDecls.insert(C->getCalledFunction());
+      llvm::Value *C = b.CreateIntrinsic(lty, iid, {op0, op1});
+      IntrinsicDecls.insert(cast<CallInst>(C)->getCalledFunction());
       return C;
     }
 
