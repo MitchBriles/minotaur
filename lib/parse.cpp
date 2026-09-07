@@ -498,6 +498,19 @@ Select *Parser::parse_select() {
   return T;
 }
 
+// minotaur::ABM has to be qualified throughout: the ABM *token* shadows it
+minotaur::ABM *Parser::parse_abm(minotaur::ABM::Op op) {
+  auto x = parse_expr();
+  auto M = parse_expr();
+  auto b = parse_expr();
+
+  tokenizer.ensure(RPAREN);
+  auto AI = make_unique<minotaur::ABM>(*x, *M, *b, op);
+  minotaur::ABM *T = AI.get();
+  exprs.emplace_back(std::move(AI));
+  return T;
+}
+
 InsertElement *Parser::parse_insertelement() {
   type elem_ty = parse_type();
   auto vec = parse_expr();
@@ -606,6 +619,10 @@ Value* Parser::parse_expr() {
     return parse_shuffle(t);
   case SELECT:
     return parse_select();
+  case ABM:
+    return parse_abm(minotaur::ABM::OR);
+  case ABMX:
+    return parse_abm(minotaur::ABM::XOR);
   case INSERTELEMENT:
     return parse_insertelement();
   case EXTRACTELEMENT:
