@@ -1,0 +1,106 @@
+#!/bin/bash
+
+# Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
+# Distributed under the MIT license that can be found in the LICENSE file.
+#
+# Runs Minotaur over LLVM IR files and appends every synthesized ABM matrix to
+# a JSONL log, for ranking with abm-rank.py.
+
+set -u
+
+LOG="${ABM_LOG:-abm.jsonl}"
+ALL="${ABM_LOG_ALL:-0}"
+JOBS="${JOBS:-1}"
+TIMEOUT="${TIMEOUT:-900}"
+SLICE_TO="${SLICE_TO:-300}"
+
+usage() {
+  cat <<EOF
+usage: abm-collect [-o LOG] [-j N] [-t SECS] [-s SECS] [-a] [-x FLAGS] <file.ll> ...
+
+  -o LOG   append records to LOG (default: \$ABM_LOG, else abm.jsonl)
+  -j N     run N files concurrently (default 1); the log is append-safe
+  -t SECS  wall-clock limit per file (default 900); real code can otherwise
+           run for hours on a single translation unit
+  -s SECS  Minotaur's per-slice limit, -minotaur-slice-to (default 300)
+  -a       also log verified rewrites that lost on cost (kind="candidate")
+  -x FLAGS extra flags for opt, e.g. -x '-minotaur-abm-mode=xor
+           -minotaur-abm-xor-max-width=32'; repeatable
+
+The log is appended to, never truncated, so repeated runs accumulate. Rank it
+with:  abm-rank.py \$LOG
+EOF
+  exit 1
+}
+
+USER_FLAGS="${ABM_FLAGS:-}"
+
+while getopts ":o:j:t:s:x:ah" opt; do
+  case $opt in
+    o) LOG="$OPTARG" ;;
+    j) JOBS="$OPTARG" ;;
+    t) TIMEOUT="$OPTARG" ;;
+    s) SLICE_TO="$OPTARG" ;;
+    x) USER_FLAGS="$USER_FLAGS $OPTARG" ;;
+    a) ALL=1 ;;
+    h) usage ;;
+    *) usage ;;
+  esac
+done
+shift $((OPTIND - 1))
+
+[ $# -eq 0 ] && usage
+
+# A kill must take the xargs workers and their opt processes with it; the
+# xargs command line does not mention this script, so killing by name leaves
+# them running and still appending to the log. Only our own subtree is
+# signalled -- never the caller's process group.
+kill_tree() {
+  local p=$1 c
+  for c in $(pgrep -P "$p" 2>/dev/null); do kill_tree "$c"; done
+  kill -9 "$p" 2>/dev/null
+}
+
+# absolute, so worker subshells resolve it the same way
+case "$LOG" in /*) ;; *) LOG="$PWD/$LOG" ;; esac
+
+EXTRA="$USER_FLAGS"
+[ "$ALL" != "0" ] && EXTRA="$EXTRA -minotaur-abm-log-all"
+
+run_one() {
+  local f="$1"
+  local start=$SECONDS
+  timeout "$TIMEOUT" @LLVM_BINARY_DIR@/bin/opt \
+    -load-pass-plugin=@ONLINE_PASS@ \
+    -passes=minotaur \
+    -minotaur-enable-caching=false \
+    -minotaur-ignore-machine-cost=true \
+    -minotaur-slice-to="$SLICE_TO" \
+    -minotaur-abm-log="$LOG" \
+    $EXTRA \
+    -S "$f" -o /dev/null >/dev/null 2>&1
+  local rc=$?
+  case $rc in
+    0)   echo "[abm-collect] ok      $((SECONDS-start))s  $f" >&2 ;;
+    124) echo "[abm-collect] timeout $((SECONDS-start))s  $f" >&2 ;;
+    *)   echo "[abm-collect] rc=$rc  $((SECONDS-start))s  $f" >&2 ;;
+  esac
+}
+export -f run_one
+export TIMEOUT SLICE_TO LOG EXTRA SECONDS
+
+if [ "$JOBS" -gt 1 ]; then
+  printf '%s\n' "$@" | xargs -P "$JOBS" -I{} bash -c 'run_one "$@"' _ {} &
+  xpid=$!
+  trap 'kill_tree $xpid; exit 130' INT TERM
+  wait $xpid
+  trap - INT TERM
+else
+  for f in "$@"; do run_one "$f"; done
+fi
+
+if [ -s "$LOG" ]; then
+  echo "[abm-collect] $(wc -l < "$LOG") records in $LOG" >&2
+else
+  echo "[abm-collect] no ABM matrices synthesized" >&2
+fi

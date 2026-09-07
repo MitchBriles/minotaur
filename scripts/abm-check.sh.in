@@ -1,0 +1,41 @@
+#!/bin/bash
+
+# Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
+# Distributed under the MIT license that can be found in the LICENSE file.
+#
+# Fast regression check for work on the ABM instruction.
+#
+# ABM is only enumerated for scalar integer cuts (see the guard in
+# Enumerator::getSketches), so the floating-point and vector tests that make up
+# most of the suite cannot be affected by it. This runs just the scalar integer
+# subset -- about 20 tests in ~15s, against ~10+ minutes for `ninja check`.
+#
+# Run the full `ninja check` before landing anything; use this while iterating.
+
+set -u
+set -o pipefail
+
+TESTS="@PROJECT_SOURCE_DIR@/tests"
+LIT="@PROJECT_SOURCE_DIR@/tests/lit/lit.py"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo 4)}"
+TIMEOUT="${TIMEOUT:-120}"
+
+# scalar integer .syn.ll tests: an integer return type and no vector types
+subset=()
+for f in "$TESTS"/*.syn.ll; do
+  grep -qE '^define i[0-9]+ @' "$f" || continue
+  grep -q 'x i' "$f" && continue
+  subset+=("$f")
+done
+
+if [ ${#subset[@]} -eq 0 ]; then
+  echo "abm-check: found no scalar integer tests under $TESTS" >&2
+  exit 1
+fi
+
+echo "abm-check: ${#subset[@]} ABM-eligible tests (of $(ls "$TESTS"/*.syn.ll | wc -l) top-level)" >&2
+
+# the lit format looks for opt-minotaur.sh in the working directory
+cd "@PROJECT_BINARY_DIR@" || exit 1
+exec python3 "$LIT" -s --no-progress-bar --timeout="$TIMEOUT" \
+  -j"$JOBS" "$@" "${subset[@]}"

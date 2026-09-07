@@ -211,6 +211,26 @@ configure_file(
   "${PROJECT_BINARY_DIR}/get-cost"
   @ONLY
 )
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-collect.sh.in"
+  "${PROJECT_BINARY_DIR}/abm-collect"
+  @ONLY
+)
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-check.sh.in"
+  "${PROJECT_BINARY_DIR}/abm-check"
+  @ONLY
+)
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-rank.py"
+  "${PROJECT_BINARY_DIR}/abm-rank.py"
+  COPYONLY
+)
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-mincost.py"
+  "${PROJECT_BINARY_DIR}/abm-mincost.py"
+  COPYONLY
+)
 
 if (NOT DEFINED TEST_NTHREADS)
   ProcessorCount(TEST_NTHREADS)
