@@ -20,6 +20,7 @@
 #include "llvm/Analysis/LoopAnalysisManager.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
+#include "llvm/Analysis/ConstantFolding.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/Constant.h"
 #include "llvm/IR/DataLayout.h"
@@ -41,6 +42,7 @@
 #include <set>
 #include <map>
 #include <limits>
+#include <random>
 
 using namespace tools;
 using namespace util;
@@ -782,6 +784,185 @@ static bool approx(const Candidate &f1, const Candidate &f2) {
   return get_approx_cost(get<0>(f1)) < get_approx_cost(get<0>(f2));
 }
 
+
+// ---------------------------------------------------------------------------
+// Basis-vector extraction
+//
+// ABM is linear: ABM(x, M, b) = (M (.) x) ^ b. On a basis vector e_j the matrix
+// product selects exactly column j, and a single term leaves nothing for OR or
+// XOR to combine, so
+//
+//     b     = f(0)
+//     col_j = f(e_j) ^ b
+//
+// recovers M and b from n+1 evaluations of the cut, identically for both
+// semirings, instead of asking the solver to search a width^2-bit constant.
+// The semirings differ only on inputs with more than one bit set, which is what
+// the screen in extractABM decides. This is what makes wide XOR affordable:
+// the cost no longer depends on the width of the matrix.
+// ---------------------------------------------------------------------------
+
+// Reference semantics, mirroring ABM_impl in alive2's smt/expr.cpp:
+// out[n-1-i] = OP over j of M[i*n + j] & x[j], then ^ b.
+static llvm::APInt abmApply(const llvm::APInt &X, const llvm::APInt &M,
+                            const llvm::APInt &B, unsigned N, bool Exclusive) {
+  llvm::APInt Res(N, 0);
+  for (unsigned i = 0; i < N; ++i) {
+    bool Acc = false;
+    for (unsigned j = 0; j < N; ++j) {
+      if (!M[uint64_t(i) * N + j] || !X[j])
+        continue;
+      if (!Exclusive) {
+        Acc = true;
+        break;
+      }
+      Acc = !Acc;
+    }
+    if (Acc)
+      Res.setBit(N - 1 - i);
+  }
+  return Res ^ B;
+}
+
+// Fold a straight-line cut to a constant for one concrete input. Anything that
+// does not constant fold (a load, a call with no folding rule, a phi) makes
+// this bail out, and the caller falls back to ordinary enumeration.
+static llvm::Constant *evalCut(llvm::Instruction *Root, llvm::Argument *X,
+                               llvm::Constant *XVal,
+                               const llvm::DataLayout &DL) {
+  llvm::DenseMap<const llvm::Value *, llvm::Constant *> Env;
+  Env[X] = XVal;
+
+  for (auto &I : *Root->getParent()) {
+    if (I.isTerminator())
+      continue;
+    if (llvm::isa<llvm::PHINode>(&I))
+      return nullptr;
+
+    llvm::SmallVector<llvm::Constant *, 8> Ops;
+    bool Ready = true;
+    for (auto &Op : I.operands()) {
+      llvm::Constant *C = nullptr;
+      if (auto *KC = llvm::dyn_cast<llvm::Constant>(Op.get())) {
+        C = KC;
+      } else {
+        auto It = Env.find(Op.get());
+        if (It != Env.end())
+          C = It->second;
+      }
+      if (!C) {
+        Ready = false;
+        break;
+      }
+      Ops.push_back(C);
+    }
+    // an instruction the root does not depend on may legitimately be unfoldable
+    if (!Ready) {
+      if (&I == Root)
+        return nullptr;
+      continue;
+    }
+
+    // @ABM and @ABMX are our own intrinsics and have no LLVM folding rule. A
+    // cut formed after an earlier rewrite can already contain them, which is
+    // exactly the case for the composite ones worth extracting, so fold them
+    // here rather than giving up.
+    llvm::Constant *R = nullptr;
+    if (auto *CI = llvm::dyn_cast<llvm::CallInst>(&I)) {
+      auto *Callee = CI->getCalledFunction();
+      if (Callee && Ops.size() == 4 &&
+          (Callee->getName() == "ABM" || Callee->getName() == "ABMX")) {
+        auto *XC = llvm::dyn_cast<llvm::ConstantInt>(Ops[0]);
+        auto *MC = llvm::dyn_cast<llvm::ConstantInt>(Ops[1]);
+        auto *BC = llvm::dyn_cast<llvm::ConstantInt>(Ops[2]);
+        if (XC && MC && BC)
+          R = llvm::ConstantInt::get(
+              CI->getType(),
+              abmApply(XC->getValue(), MC->getValue(), BC->getValue(),
+                       XC->getBitWidth(), Callee->getName() == "ABMX"));
+      }
+    }
+    if (!R)
+      R = llvm::ConstantFoldInstOperands(&I, Ops, DL);
+    if (!R) {
+      if (&I == Root)
+        return nullptr;
+      continue;
+    }
+    Env[&I] = R;
+    if (&I == Root)
+      return R;
+  }
+  return nullptr;
+}
+
+// Recover M and b, then screen both semirings on inputs with many bits set.
+// Returns the semirings that reproduced the cut on every sample.
+static vector<ABM::Op> extractABM(llvm::Instruction *Root, llvm::Argument *X,
+                                  unsigned N, const llvm::DataLayout &DL,
+                                  llvm::APInt &M, llvm::APInt &B,
+                                  unsigned &Samples) {
+  vector<ABM::Op> Ops;
+  Samples = 0;
+
+  auto eval = [&](const llvm::APInt &V) -> llvm::ConstantInt * {
+    auto *C = evalCut(Root, X, llvm::ConstantInt::get(X->getType(), V), DL);
+    return C ? llvm::dyn_cast<llvm::ConstantInt>(C) : nullptr;
+  };
+
+  auto *Zero = eval(llvm::APInt(N, 0));
+  if (!Zero)
+    return Ops;
+  B = Zero->getValue();
+
+  M = llvm::APInt(uint64_t(N) * N, 0);
+  for (unsigned j = 0; j < N; ++j) {
+    llvm::APInt E(N, 0);
+    E.setBit(j);
+    auto *Cj = eval(E);
+    if (!Cj)
+      return Ops;
+    llvm::APInt Col = Cj->getValue() ^ B;
+    for (unsigned o = 0; o < N; ++o)
+      if (Col[o])
+        M.setBit(uint64_t(N - 1 - o) * N + j);
+  }
+
+  // fixed seed so a run is reproducible
+  std::mt19937_64 RNG(0x9E3779B97F4A7C15ULL);
+  bool OkOr = true, OkXor = true;
+  for (unsigned k = 0; k < 256 && (OkOr || OkXor); ++k) {
+    llvm::APInt V(N, 0);
+    if (k == 0) {
+      V.setAllBits();
+    } else {
+      for (unsigned w = 0; w < N; w += 64) {
+        unsigned Chunk = std::min(64u, N - w);
+        // mask explicitly: APInt(bits, val) does not truncate val for us, and
+        // an over-wide word silently breaks the APInt's invariants
+        uint64_t Word = RNG();
+        if (Chunk < 64)
+          Word &= (uint64_t(1) << Chunk) - 1;
+        V.insertBits(llvm::APInt(Chunk, Word), w);
+      }
+    }
+    auto *R = eval(V);
+    if (!R)
+      return {};
+    if (OkOr && abmApply(V, M, B, N, false) != R->getValue())
+      OkOr = false;
+    if (OkXor && abmApply(V, M, B, N, true) != R->getValue())
+      OkXor = false;
+    ++Samples;
+  }
+
+  if (OkOr)
+    Ops.push_back(ABM::OR);
+  if (OkXor)
+    Ops.push_back(ABM::XOR);
+  return Ops;
+}
+
 vector<Rewrite> Enumerator::solve(llvm::Function &F, llvm::Instruction *I) {
   unsigned CANDIDATES = 0, PRUNED = 0, GOOD = 0;
   vector<Rewrite> ret;
@@ -836,6 +1017,75 @@ vector<Rewrite> Enumerator::solve(llvm::Function &F, llvm::Instruction *I) {
   }
 
   getSketches(&*I, Sketches);
+
+  // Basis-vector extraction, tried ahead of the enumerated sketches. It costs
+  // n+1 constant folds rather than an SMT search, so it is not width capped;
+  // when the cut is not ABM shaped it simply adds nothing.
+  if (config::abm_extract && config::abm_mode &&
+      I->getType()->isIntegerTy()) {
+    unsigned N = I->getType()->getIntegerBitWidth();
+
+    // Exactly one used integer argument of the root's width: the unary
+    // instruction class ABM is meant to describe.
+    llvm::Argument *X = nullptr;
+    unsigned Used = 0;
+    for (auto &A : F.args()) {
+      if (A.use_empty())
+        continue;
+      ++Used;
+      if (A.getType()->isIntegerTy() &&
+          A.getType()->getIntegerBitWidth() == N)
+        X = &A;
+    }
+
+    if (Used == 1 && X && N > 1 && I->getParent() == &F.getEntryBlock() &&
+        uint64_t(N) * N <= std::numeric_limits<unsigned>::max()) {
+      llvm::APInt MV(1, 0), BV(1, 0);
+      unsigned Samples = 0;
+      auto Ops = extractABM(&*I, X, N, DL, MV, BV, Samples);
+
+      for (auto Op : Ops) {
+        type matTy = type::Integer((unsigned)(uint64_t(N) * N));
+        auto *MC = llvm::ConstantInt::get(matTy.toLLVM(F.getContext()), MV);
+        auto *BC = llvm::ConstantInt::get(I->getType(), BV);
+
+        auto XT = make_unique<Var>(X);
+        auto MT = make_unique<ReservedConst>(matTy, MC);
+        auto BT = make_unique<ReservedConst>(type(I->getType()), BC);
+        auto AT = make_unique<ABM>(*XT.get(), *MT.get(), *BT.get(), Op);
+
+        debug() << "[enumerator] extracted " << *AT.get() << " from "
+                << Samples << " samples\n";
+
+        // Log the extraction itself, not just whatever survives verification.
+        // Wide XOR is often beyond the solver's budget even though the matrix
+        // is computed exactly, and losing those is losing the best findings.
+        if (!config::abm_log_path.empty()) {
+          // known bits are a property of the original value, not of a cut
+          // argument, so extraction records leave them empty
+          vector<ABMUse> U{ABMUse{N, MV, BV, true, Op == ABM::XOR, 0, 1.0,
+                                  llvm::APInt(N, 0), llvm::APInt(N, 0)}};
+          string cutIR;
+          llvm::raw_string_ostream cs(cutIR);
+          cs << F;
+          cs.flush();
+          writeABMRecords(U, "extracted", cutIR, src_cost, 1,
+                          "basis-vectors+" + std::to_string(Samples) +
+                              "-samples");
+        }
+
+        // no reserved constants: HaveC stays false and the candidate goes
+        // straight to verification instead of constant synthesis
+        Sketches.insert(Sketches.begin(),
+                        make_pair(AT.get(), set<ReservedConst*>()));
+        exprs.emplace_back(std::move(AT));
+        exprs.emplace_back(std::move(BT));
+        exprs.emplace_back(std::move(MT));
+        exprs.emplace_back(std::move(XT));
+      }
+    }
+  }
+
   debug() << "[enumerator] listing sketches\n";
   for (auto &Sketch : Sketches) {
     debug() << *Sketch.first << "\n";

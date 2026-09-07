@@ -75,6 +75,12 @@ llvm::cl::opt<unsigned> slice_to(
     llvm::cl::desc("minotaur: timeout per slice"),
     llvm::cl::init(900), llvm::cl::value_desc("s"));
 
+llvm::cl::opt<bool> abm_extract(
+    "minotaur-abm-extract",
+    llvm::cl::desc("minotaur: recover ABM matrices by evaluating the cut on "
+                   "basis vectors instead of searching for them"),
+    llvm::cl::init(true));
+
 llvm::cl::opt<bool> smt_verbose(
     "minotaur-smt-verbose",
     llvm::cl::desc("minotaur: SMT verbose mode"),
@@ -316,6 +322,7 @@ optimize_function(llvm::Function &F, LoopInfo &LI, DominatorTree &DT,
   config::debug_slicer = debug_slicer;
   config::debug_codegen = debug_codegen;
   config::debug_parser = debug_parser;
+  config::abm_extract = abm_extract;
   config::slice_to = slice_to;
   config::abm_max_width = abm_max_width;
   config::abm_xor_max_width = abm_xor_max_width;
