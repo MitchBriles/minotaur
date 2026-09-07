@@ -265,6 +265,26 @@ def report_candidates(ranked, args):
         found = mc.search(target, xs, w, mask, args.max_len)
         if found is not None and found.length < 3:
             continue
+
+        # A runtime mask can be the input itself, and then the mask cancels
+        # part of the matrix: ABMX(x, I ^ P, x) is just P(x). Such a record
+        # looks like a rich operation but the cut it replaced is trivial, so
+        # judge it by what it collapses to.
+        if g["masks"].most_common(1)[0][0] is None:
+            if op == "xor":
+                # for XOR the collapse is exact: ABMX(x, M, x) = (M ^ I) x
+                ident = 0
+                for k in range(w):
+                    ident |= 1 << ((w - 1 - k) * w + k)
+                if classify(m ^ ident, w) in CHEAP:
+                    continue
+            else:
+                collapsed = tuple(v ^ t for v, t in zip(xs, target))
+                if collapsed == tuple(xs):
+                    continue
+                c_found = mc.search(collapsed, xs, w, 0, args.max_len)
+                if c_found is not None and c_found.length < 3:
+                    continue
         if found is not None:
             steps = [t.strip() for t in found.text.split("\n")[1:] if t.strip()]
             n_instr, exact = found.length, True

@@ -106,6 +106,30 @@ def _transforms(n):
     add_const("sub", lambda v, c: v - c)
     add_const("mul", lambda v, c: v * c)
 
+    # single instructions in LLVM IR and on real ISAs. Without these the
+    # search charges three instructions for a byte swap and would report the
+    # operations existing ISAs already cover as candidates.
+    for k in range(1, n):
+        kk, rk = np.uint64(k), np.uint64(n - k)
+        out.append((f"call @llvm.fshl(%v, %v, {k})",
+                    lambda v, kk=kk, rk=rk: ((v << kk) | (v >> rk)) & full))
+    if n >= 16 and n % 8 == 0:
+        nb = n // 8
+        def _bswap(v, nb=nb):
+            r = np.zeros_like(v)
+            for b in range(nb):
+                byte = (v >> np.uint64(8 * b)) & np.uint64(0xFF)
+                r = r | (byte << np.uint64(8 * (nb - 1 - b)))
+            return r & full
+        out.append(("call @llvm.bswap(%v)", _bswap))
+
+    def _bitrev(v):
+        r = np.zeros_like(v)
+        for i in range(n):
+            r = r | (((v >> np.uint64(i)) & np.uint64(1)) << np.uint64(n - 1 - i))
+        return r & full
+    out.append(("call @llvm.bitreverse(%v)", _bitrev))
+
     for k in range(1, n):
         kk = np.uint64(k)
         out.append((f"shl %v, {k}", lambda v, kk=kk: (v << kk) & full))
