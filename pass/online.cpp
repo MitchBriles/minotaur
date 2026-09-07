@@ -21,6 +21,7 @@
 
 #include "llvm/ADT/Any.h"
 #include "llvm/Analysis/DominanceFrontier.h"
+#include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/MemoryDependenceAnalysis.h"
 #include "llvm/Analysis/TargetLibraryInfo.h"
@@ -136,6 +137,36 @@ llvm::cl::opt<bool> force_infer(
 llvm::cl::opt<string> report_dir("minotaur-report-dir",
   llvm::cl::desc("Save report to disk"), llvm::cl::value_desc("directory"));
 
+llvm::cl::opt<unsigned> abm_max_width(
+    "minotaur-abm-max-width",
+    llvm::cl::desc("minotaur: widest scalar type ABM is enumerated for; the "
+                   "matrix is a width^2-bit constant, so synthesis cost grows "
+                   "quickly with width"),
+    llvm::cl::init(64), llvm::cl::value_desc("bits"));
+
+llvm::cl::opt<unsigned> abm_xor_max_width(
+    "minotaur-abm-xor-max-width",
+    llvm::cl::desc("minotaur: widest scalar @ABMX is enumerated for; the XOR "
+                   "semiring makes every output bit a parity, which is far "
+                   "harder to solve than the OR form"),
+    llvm::cl::init(16), llvm::cl::value_desc("bits"));
+
+llvm::cl::opt<string> abm_mode(
+    "minotaur-abm-mode",
+    llvm::cl::desc("minotaur: which ABM semirings to enumerate: "
+                   "or (@ABM), xor (@ABMX), or both"),
+    llvm::cl::init("both"), llvm::cl::value_desc("or|xor|both"));
+
+llvm::cl::opt<string> abm_log("minotaur-abm-log",
+  llvm::cl::desc("minotaur: append synthesized ABM matrices to this JSONL file"),
+  llvm::cl::value_desc("file"));
+
+llvm::cl::opt<bool> abm_log_all(
+    "minotaur-abm-log-all",
+    llvm::cl::desc("minotaur: log every verified ABM rewrite, not just the "
+                   "one that is applied"),
+    llvm::cl::init(false));
+
 static bool dom_check(llvm::Value *V, DominatorTree &DT, llvm::Use &U) {
   if (auto I = dyn_cast<Instruction>(V)) {
     for (auto &op : I->operands()) {
@@ -238,7 +269,8 @@ infer(Function &F, Instruction *I, redisContext *ctx, Enumerator &EN, parse::Par
 
 static bool
 optimize_function(llvm::Function &F, LoopInfo &LI, DominatorTree &DT,
-                  TargetLibraryInfoWrapperPass &TLI) {
+                  TargetLibraryInfoWrapperPass &TLI,
+                  BlockFrequencyInfo *BFI = nullptr) {
   // set up debug output
   raw_ostream *out_file = &errs();
   if (!report_dir.empty()) {
@@ -284,7 +316,29 @@ optimize_function(llvm::Function &F, LoopInfo &LI, DominatorTree &DT,
   config::debug_codegen = debug_codegen;
   config::debug_parser = debug_parser;
   config::slice_to = slice_to;
+  config::abm_max_width = abm_max_width;
+  config::abm_xor_max_width = abm_xor_max_width;
+  if (abm_mode == "or")
+    config::abm_mode = config::ABM_MODE_OR;
+  else if (abm_mode == "xor")
+    config::abm_mode = config::ABM_MODE_XOR;
+  else if (abm_mode == "both")
+    config::abm_mode = config::ABM_MODE_BOTH;
+  else
+    report_fatal_error("minotaur-abm-mode must be one of: or, xor, both");
+  config::abm_log_path = abm_log;
+  config::abm_log_all = abm_log_all;
+  config::current_function = F.getName().str();
+  config::current_source = F.getParent()->getSourceFileName();
   smt::solver_print_queries(smt_verbose);
+
+  // the pre-optimization function, recorded alongside any ABM we synthesize
+  string original_ir;
+  if (!abm_log.empty()) {
+    raw_string_ostream os(original_ir);
+    os << F;
+    os.flush();
+  }
 
   smt::set_query_timeout(to_string(smt_to * 1000));
 

@@ -29,6 +29,15 @@ bool return_first_solution = false;
 unsigned slice_to;
 unsigned slicer_max_depth = 5;
 
+unsigned abm_max_width = 64;
+unsigned abm_xor_max_width = 16;
+bool abm_extract = true;
+unsigned abm_mode = ABM_MODE_BOTH;
+std::string abm_log_path;
+bool abm_log_all = false;
+std::string current_function;
+std::string current_source;
+
 
 llvm::raw_ostream &dbg() {
   return *debug_os;

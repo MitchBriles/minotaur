@@ -308,28 +308,28 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
     }
   }
 
-  // ABM: rhs expected to be integer scalar, matrix operand is width^2
+  // ABM: rhs expected to be integer scalar, matrix operand is width^2.
+  // Synthesizing the matrix gets expensive as width grows, so each semiring is
+  // capped separately; see config::abm_max_width / abm_xor_max_width.
+  vector<ABM::Op> abm_ops;
   if (!expected.isFP() && expected.getLane() == 1) {
+    if ((config::abm_mode & config::ABM_MODE_OR) &&
+        expected.getBits() <= config::abm_max_width)
+      abm_ops.push_back(ABM::OR);
+    if ((config::abm_mode & config::ABM_MODE_XOR) &&
+        expected.getBits() <= config::abm_xor_max_width)
+      abm_ops.push_back(ABM::XOR);
+  }
+  if (!abm_ops.empty()) {
     uint64_t matBits = uint64_t(expected.getBits()) * expected.getBits();
     if (matBits <= std::numeric_limits<unsigned>::max()) {
       type matTy = type::Integer(static_cast<unsigned>(matBits));
-      auto addAbm = [&](Value *X, Value *M, Value *B,
-                        set<ReservedConst*> RCs) {
-        auto abm = make_unique<ABM>(*X, *M, *B);
-        sketches.push_back(make_pair(abm.get(), std::move(RCs)));
-        exprs.emplace_back(std::move(abm));
-      };
 
-      // collect B candidates (existing values + fresh constant)
+      // Collect B candidates. The fresh constant goes first so that ties are
+      // broken toward ABM(x, M, const): a rewrite that reuses a live value as
+      // the mask always has an equivalent constant-mask form, and only the
+      // latter names a matrix that is comparable across programs.
       vector<pair<Value*, set<ReservedConst*>>> bCandidates;
-      for (auto B : Comps) {
-        auto bty = B->getType();
-        if (!bty.isValid() || bty.isFP() || bty.isVector())
-          continue;
-        if (!bty.same_width(expected))
-          continue;
-        bCandidates.push_back({B, {}});
-      }
       {
         auto T = make_unique<ReservedConst>(expected);
         auto *BConst = T.get();
@@ -338,17 +338,17 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
         bCandidates.push_back({BConst, RCs});
         exprs.emplace_back(std::move(T));
       }
-
-      // collect M candidates (existing values + fresh constant)
-      vector<pair<Value*, set<ReservedConst*>>> m_candidates;
-      for (auto M : Comps) {
-        auto mty = M->getType();
-        if (!mty.isValid() || mty.isFP() || mty.isVector())
+      for (auto B : Comps) {
+        auto bty = B->getType();
+        if (!bty.isValid() || bty.isFP() || bty.isVector())
           continue;
-        if (!mty.same_width(matTy))
+        if (!bty.same_width(expected))
           continue;
-        m_candidates.push_back({M, {}});
+        bCandidates.push_back({B, {}});
       }
+
+      // collect M candidates (fresh constant first, same reasoning)
+      vector<pair<Value*, set<ReservedConst*>>> m_candidates;
       {
         // auto *MVal = llvm::Constant::getIntegerValue(matTy.toLLVM(V->getContext()), llvm::APInt(matBits, 9078117754732544L));
         auto T = make_unique<ReservedConst>(matTy/*, MVal*/);
@@ -357,6 +357,14 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
         RCs.insert(MConst);
         m_candidates.push_back({MConst, RCs});
         exprs.emplace_back(std::move(T));
+      }
+      for (auto M : Comps) {
+        auto mty = M->getType();
+        if (!mty.isValid() || mty.isFP() || mty.isVector())
+          continue;
+        if (!mty.same_width(matTy))
+          continue;
+        m_candidates.push_back({M, {}});
       }
 
       for (auto X : Comps) {
@@ -368,6 +376,9 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
 
         for (auto &[BVal, b_rcs] : bCandidates) {
           for (auto &[MVal, m_rcs] : m_candidates) {
+            // one sketch per semiring; the constants below are cloned per op
+            // so the OR and XOR candidates never share reserved constants
+            for (auto abm_op : abm_ops) {
             set<ReservedConst*> RCs;
 
             // Clone reserved constants so each sketch owns its own copy and
@@ -393,7 +404,10 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
               RCs.insert(m_rcs.begin(), m_rcs.end());
             }
 
-            addAbm(X, MUse, BUse, std::move(RCs));
+            auto abm = make_unique<ABM>(*X, *MUse, *BUse, abm_op);
+            sketches.push_back(make_pair(abm.get(), std::move(RCs)));
+            exprs.emplace_back(std::move(abm));
+            }
           }
         }
       }
