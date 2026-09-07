@@ -132,3 +132,141 @@ with the synthesized optimizations.
 To dump synthesized results from cache, use `cache-dump`.
 
     $HOME/minotaur/build/cache-dump
+
+### Ranking ABM matrices
+
+Minotaur can synthesize `ABM(x, M, b)`, the affine bit-manipulation operation
+described in `ABM.md`, which computes `M*x + b` over GF(2). To find out which
+matrices programs actually use, pass `-minotaur-abm-log` and Minotaur appends
+one JSON record per synthesized ABM to that file:
+
+    $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/online.so \
+      -passes=minotaur -minotaur-abm-log=abm.jsonl <LLVM bitcode>
+
+Records are appended, never truncated, and each line is written whole, so
+parallel builds can share one log. `abm-collect` wraps this for a list of IR
+files:
+
+    $HOME/minotaur/build/abm-collect -o abm.jsonl tests/abm/*.ll
+
+`-x` passes extra flags through to `opt`, which is how the semiring and width caps are selected
+for a run:
+
+    $HOME/minotaur/build/abm-collect -o abm.jsonl -a \
+      -x '-minotaur-abm-mode=xor -minotaur-abm-xor-max-width=32' foo.ll
+
+By default only the rewrite that was actually applied is logged, read off the
+finished function so that a matrix later folded into a wider one is not counted
+alongside its own replacement. Adding `-a` (or `-minotaur-abm-log-all`) also
+records verified rewrites that lost on cost, as `kind="candidate"`.
+
+Minotaur also recovers ABM matrices without searching for them. ABM is linear,
+so on a basis vector the matrix product selects exactly one column and there is
+nothing for OR or XOR to combine:
+
+    b     = f(0)
+    col_j = f(e_j) ^ b
+
+`n + 1` evaluations of a cut therefore give `M` and `b` outright, for either
+semiring, and the two are told apart by testing inputs with more than one bit
+set. This is on by default (`-minotaur-abm-extract=false` turns it off, which is
+useful for comparing against pure enumeration). Because the cost no longer
+depends on the width of the matrix, it reaches cases the solver cannot: the
+bit-serial CRC-32 step in zlib's `multmodp` is an i32 `@ABMX` with mask 0, and
+540s of XOR-only search never found it while extraction recovers and verifies it
+in seconds.
+
+Extraction results are logged as `kind="extracted"` with an `evidence` field,
+separately from `accepted`, because a wide XOR matrix is often computed exactly
+even when proving it is beyond the solver's budget.
+
+Long functions can starve the rest of a translation unit, so
+`-minotaur-function-to=SECS` bounds time per function (0, the default, means no
+limit). With it `crc32.ll` finishes in 91s and yields records from four
+functions; without it the file runs past 600s and only ever reports `crc32_z`.
+
+`abm-rank.py` groups the log on (width, matrix) and ranks by commonality:
+
+    $HOME/minotaur/build/abm-rank.py abm.jsonl
+
+    # 11 accepted record(s), 9 distinct matrix/matrices
+
+    #1  count=3  width=8  matrix=0x1020408102040
+        0 1 0 0 0 0 0 0
+        0 0 1 0 0 0 0 0
+        ...
+        mask: 0x00 x3
+        from: addself @ tests/abm/addself.ll, mul2 @ ..., shl1 @ ...
+
+`--interesting` keeps only matrices that need more than one ordinary
+instruction, dropping the identities, shifts, extracts, permutations and
+negations that existing ISAs already cover; `--extracted` selects only
+basis-vector results. Every entry reports its `class`.
+
+Useful flags: `--all` to include candidates and extractions, `--top N`,
+`--color`, `--llvm` to
+print the matrix as an LLVM vector constant, and `--json`. Matrices are laid
+out with row 0 on top as the most significant bit of the result, i.e.
+`out[N-1-i] = OR over j of M[i*N + j] & x[j]`.
+
+There are two intrinsics, enumerated together by default: `@ABM` sums the
+matrix product with OR, `@ABMX` with XOR. `-minotaur-abm-mode=or|xor|both`
+selects which. Each has its own width cap, because XOR turns every output bit
+into a parity and is far harder to solve: `-minotaur-abm-max-width` (default
+64) and `-minotaur-abm-xor-max-width` (default 16).
+
+Each record also carries `loop_depth` and `rel_freq` (the containing block's
+frequency relative to function entry), so a site in a hot loop can outweigh one
+on a cold path:
+
+    abm-rank.py --by freq abm.jsonl     # or: --by count (default), --by depth
+    abm-rank.py --op xor abm.jsonl      # only @ABMX records
+
+Each accepted record also carries `known_zero` / `known_one` for the ABM's input,
+from `computeKnownBits`. A matrix only has to agree with the original on
+reachable inputs, so without this a rewrite can look far stranger than the
+operation really is: the smear accepted in zlib's `deflateInit2_` is just
+`x - 1` on the powers of two that reach it.
+
+An ABM is one cheap unary instruction by premise, so its cost is 1 and cannot
+discriminate between candidates. What decides whether a matrix deserves opcode
+space is `frequency x savings`, where savings is the cost of the cheapest
+ABM-free implementation minus one. `abm-mincost.py` measures that second factor:
+
+    $HOME/minotaur/build/abm-mincost.py --verify abm.jsonl
+
+    @ABM  i32  count=4  min=3 instruction(s)
+        matrix=0x100000002000000040000000...  mask=0x8
+          add %v, 7
+          and %v, 7
+          add %v, 1
+        alive-tv: verified
+
+Depth 0 to 2 is exhaustive, so "needs 3 or more" is exact, which is the bar that
+matters. Depth 3 is reached by inverting the final instruction, so a reported 3
+is real while "more than 3" is a lower bound. `--verify` proves the winning
+sequence with `alive-tv`, and `--ignore-preconditions` judges a matrix on all
+inputs rather than only reachable ones.
+
+`rel_freq` comes from LLVM's `BlockFrequencyInfo`. Without profile metadata
+that is a static loop-nesting estimate rather than measured frequency -- useful
+as a proxy, but not a substitute for a real profile. It improves automatically
+on IR that carries `!prof`. Logs written before these fields existed still
+rank fine; they fall back to `op=or`, `rel_freq=1.0`, `loop_depth=0`.
+
+While iterating on ABM, `abm-check` runs just the scalar integer tests -- the
+only ones ABM enumeration can reach, since floating-point and vector cuts skip
+it -- in about 15 seconds, rather than the much longer full `ninja check`:
+
+    $HOME/minotaur/build/abm-check
+
+`-minotaur-abm-max-width=0` turns ABM enumeration off entirely, which is a
+quick way to tell whether a change in behaviour is coming from ABM or from
+somewhere else.
+
+`tests/abm/` holds small `i8` samples covering shifts, rotates and
+`bitreverse`. Note that the matrix product sums with OR while the mask is
+applied with XOR, so an XOR-linear transform such as `x ^ (x >> 3)`
+(`xorshift.ll`, `clmul3.ll`) is matched by putting the XOR in the mask operand:
+the result is `ABM(x, M, %x)` with a runtime mask, whose matrix describes only
+the shift. Such records are logged with `"mask": null`.
