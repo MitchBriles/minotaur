@@ -187,6 +187,37 @@ def fanin(matrix, n):
             for i in range(n)]
 
 
+def support(matrix, n):
+    """Which input bits the matrix reads and which output bits it drives.
+
+    The input support is what decides whether an operation is a small table: a
+    matrix reading k bits is a function of 2^k inputs, so at k=8 it is a
+    256-entry lookup regardless of how wide the value is.
+    """
+    ins, outs = set(), set()
+    for i in range(n):
+        for j in range(n):
+            if (matrix >> (i * n + j)) & 1:
+                ins.add(j)
+                outs.add(n - 1 - i)
+    return ins, outs
+
+
+def collapse_class(matrix, n, op):
+    """What ABM(x, M, x) reduces to, for a runtime mask that is the input.
+
+    For XOR this is exact: ABMX(x, M, x) = (M ^ I) x. A record whose collapse
+    is something an ISA already has replaced a trivial cut, however rich the
+    matrix looks.
+    """
+    if op != "xor":
+        return None
+    ident = 0
+    for k in range(n):
+        ident |= 1 << ((n - 1 - k) * n + k)
+    return classify(matrix ^ ident, n)
+
+
 # Matrices in these classes are already covered by one ordinary instruction, so
 # they are noise for the research query even though they are valid rewrites.
 CHEAP = {"zero", "identity", "shift/extract", "permutation", "negation"}
@@ -234,6 +265,66 @@ def load_mincost():
     except Exception:
         return None
     return mod
+
+
+def report_tables(ranked, args):
+    """Operations over a small input domain.
+
+    Any operation a program performs often is of interest, not only the ones
+    that look like bit twiddling. A matrix reading few input bits is a lookup
+    table, which is exactly what dedicated hardware is good at, so these are
+    reported on their own terms rather than filtered out for being "just" a
+    table.
+    """
+    mc = load_mincost()
+    out = []
+    for (op, w, m), g in ranked:
+        if len(g["projects"]) < args.min_projects:
+            continue
+        ins, outs = support(m, w)
+        if not ins or len(ins) > args.max_input_bits:
+            continue
+        # a pure extract or permutation needs no table
+        if classify(m, w) in CHEAP:
+            continue
+        out.append(((op, w, m), g, ins, outs))
+
+    out.sort(key=lambda e: (-len(e[1]["projects"]), -e[1]["sites"]
+                            if "sites" in e[1] else -e[1]["count"], len(e[2])))
+    if args.top:
+        out = out[:args.top]
+
+    print(f"# {len(out)} small-domain operation(s), at most "
+          f"{args.max_input_bits} input bits, ranked by how many projects "
+          f"perform them")
+
+    for i, ((op, w, m), g, ins, outs) in enumerate(out):
+        fn = "@ABMX" if op == "xor" else "@ABM"
+        mask_hex = g["masks"].most_common(1)[0][0]
+        print(f"\n#{i + 1}  {fn}  i{w}  {len(ins)} -> {len(outs)} bits "
+              f"({2 ** len(ins)} entry table)  projects={len(g['projects'])}  "
+              f"sites={g['count']}")
+        body = render_summary(m, w, op).splitlines()
+        if len(body) > args.summary_lines:
+            keep = args.summary_lines - 1
+            body = body[:keep] + [f"    ... ({len(body) - keep} more rows)"]
+        print("\n".join(body))
+        print(f"    reads bits: {sorted(ins)}")
+        print(f"    mask:   {fmt_mask(mask_hex, w)}")
+        if mask_hex is None:
+            cc = collapse_class(m, w, op)
+            if cc:
+                note = ("reduces to a " + cc if cc in CHEAP
+                        else "stays " + cc)
+                print(f"    with mask = x: {note}")
+        if mc is not None:
+            steps, n_instr = mc.lower_matrix(
+                m, int(mask_hex, 16) if mask_hex else 0, w, op)
+            print(f"    implementation: {n_instr} instructions")
+        print(f"    projects: {', '.join(sorted(g['projects']))}")
+        sites = ", ".join(f for (f, _), _ in g["sites"].most_common(3))
+        print(f"    sites:    {sites[:100]}")
+    return 0
 
 
 def report_candidates(ranked, args):
@@ -381,6 +472,14 @@ def main():
                     help="rank by number of sites (default), by summed "
                          "execution frequency, by deepest loop nesting, or by "
                          "how many distinct projects a matrix appears in")
+    ap.add_argument("--tables", action="store_true",
+                    help="report operations over a small input domain: a "
+                         "matrix reading k input bits is a 2^k entry lookup, "
+                         "which is a shape hardware implements well. Ranked "
+                         "by how many projects perform them")
+    ap.add_argument("--max-input-bits", type=int, default=12, metavar="N",
+                    help="with --tables, the largest input support to report "
+                         "(default 12, a 4096 entry table)")
     ap.add_argument("--candidates", action="store_true",
                     help="report the top candidate operations: only matrices "
                          "needing 3 or more ordinary instructions, ranked by "
@@ -444,7 +543,11 @@ def main():
                   file=sys.stderr)
             return 1
 
-    ranked = group(records, "projects" if args.candidates else args.by)
+    ranked = group(records,
+                   "projects" if (args.candidates or args.tables) else args.by)
+
+    if args.tables:
+        return report_tables(ranked, args)
 
     if args.candidates:
         return report_candidates(ranked, args)
