@@ -83,6 +83,11 @@ llvm::cl::opt<unsigned> function_to(
                    "translation unit and later functions are never reached"),
     llvm::cl::init(0), llvm::cl::value_desc("s"));
 
+llvm::cl::opt<bool> show_stats(
+    "minotaur-show-stats",
+    llvm::cl::desc("minotaur: print SMT query statistics on exit"),
+    llvm::cl::init(false));
+
 llvm::cl::opt<bool> abm_extract(
     "minotaur-abm-extract",
     llvm::cl::desc("minotaur: recover ABM matrices by evaluating the cut on "
@@ -330,6 +335,7 @@ optimize_function(llvm::Function &F, LoopInfo &LI, DominatorTree &DT,
   config::debug_slicer = debug_slicer;
   config::debug_codegen = debug_codegen;
   config::debug_parser = debug_parser;
+  config::show_stats = show_stats;
   config::abm_extract = abm_extract;
   config::slice_to = slice_to;
   config::abm_max_width = abm_max_width;
@@ -498,6 +504,9 @@ final:
   else {
     debug() << "[online] minotaur completed, no change to the program\n";
   }
+
+  if (config::show_stats)
+    smt::solver_print_stats(std::cerr);
 
   if (out_file != &errs()) {
     out_file->flush();
