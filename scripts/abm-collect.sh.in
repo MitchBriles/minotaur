@@ -101,10 +101,13 @@ run_one() {
   local f="$1"
   local start=$SECONDS
   # IR from older LLVMs can carry alias-scope metadata today's verifier
-  # rejects; it is irrelevant here, so strip it on the way in
+  # rejects; it is irrelevant here, so strip it (and the scope declarations
+  # that point at it) on the way in
   local errf
   errf=$(mktemp)
-  sed -E 's/, !(alias\.scope|noalias) ![0-9]+//g' "$f" |
+  sed -E -e 's/, !(alias\.scope|noalias) ![0-9]+//g' \
+    -e '/call void @llvm\.experimental\.noalias\.scope\.decl\(metadata ![0-9]+\)/d' \
+    "$f" |
     prlimit --as=$((MEM_MB << 20)) \
     timeout -k 10 "$TIMEOUT" @LLVM_BINARY_DIR@/bin/opt \
     -load-pass-plugin=@ONLINE_PASS@ \

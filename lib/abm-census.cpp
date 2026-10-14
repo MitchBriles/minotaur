@@ -689,6 +689,9 @@ unsigned runABMCensus(Function &F, const LoopInfo &LI, const DominatorTree &DT,
                   << ": " << EC.message() << "\n";
     return 0;
   }
+  // unbuffered: a record longer than the buffer would otherwise go out in
+  // several writes and interleave with other processes appending to the log
+  OS.SetUnbuffered();
   double EntryFreq =
       BFI ? (double)BFI->getEntryFreq().getFrequency() : 0.0;
   unsigned N = 0;

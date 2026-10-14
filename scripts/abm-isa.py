@@ -114,6 +114,30 @@ def full_mask(a, k, d):
 
 # --- recognizers: each returns {isa: (count, how)} for what it matches -----
 
+def sext_field(a, mp):
+    """(field_lo, k, lo, top) when the outputs are a sign extension of a k-bit
+    field starting at input bit field_lo, placed at output bit lo, with its
+    sign repeated up to output bit top and zeros everywhere else."""
+    pm = {o: j for o, j in enumerate(mp) if j is not None}
+    if not pm:
+        return None
+    top = max(pm)
+    jt = pm[top]
+    o = top
+    while o - 1 in pm and pm[o - 1] == jt:
+        o -= 1
+    run_lo = o
+    if run_lo == top:
+        return None
+    d = run_lo - jt
+    lo = run_lo
+    while lo - 1 in pm and pm[lo - 1] == lo - 1 - d:
+        lo -= 1
+    if set(pm) != set(range(lo, top + 1)):
+        return None
+    return lo - d, run_lo - lo + 1, lo, top
+
+
 def rec_unary_perm(a, mp):
     """Single input, every output bit a copy of one input bit (or zero)."""
     res = {}
@@ -165,6 +189,22 @@ def rec_unary_perm(a, mp):
             put("rv", 1, "brev8")
             put("arm", 2, "rbit+rev")
             put("x86", 3, "gf2p8affineqb (via xmm)")
+    # sign extension of a field (sbfx / movsx / sext.b|h|w)
+    sx = sext_field(a, mp)
+    if sx:
+        field_lo, kbits, lo, top = sx
+        aligned = lo == 0 and field_lo - off == 0 and kbits in (8, 16, 32)
+        n = 1 if aligned else 2 if lo == 0 else 3
+        # a sign run that stops short of the top is a narrower extension
+        # zero-extended: free on x86/AArch64 when it stops at bit 31 (32-bit
+        # ops clear the upper half), one more and/zext.w otherwise
+        short = top != out - 1
+        free32 = top == 31
+        put("arm", 1 + (1 if short and not free32 else 0), "sbfx/sbfiz")
+        put("x86", n + (1 if short and not free32 else 0),
+            "movsx" if aligned else "shl+sar")
+        put("rv", n + (1 if short else 0),
+            "sext.b/h/w" if aligned else "slli+srai")
     # broadcast of one bit to a contiguous run (sign replicate, -(x>>j & 1))
     src = {j for _, j in pairs}
     outs = sum(1 << o for o, _ in pairs)
@@ -335,7 +375,48 @@ def _terms(a):
     return terms
 
 
+def _sar_rows(a, k, s):
+    """Rows of ashr(input k, s), widened or truncated to the output."""
+    w, off = a.widths[k], a.offs[k]
+    return [1 << (off + min(o + s, w - 1)) for o in range(a.out)]
+
+
 def network_cost(a):
+    """The cheapest network, with or without one sign-replication term: an
+    ashr of one input taken out first, as in x ^ (x >> 63) or the
+    sign-dependent masks of branch-free code."""
+    best = _network_cost(a)
+    if not any(r & (r - 1) for r in a.rows):
+        return best
+    for k in a.used_inputs():
+        w = a.widths[k]
+        top = 1 << (a.offs[k] + w - 1)
+        if sum(1 for r in a.rows if r & top) < 3:
+            continue
+        for sh in range(w):
+            pat = _sar_rows(a, k, sh)
+            # under OR the term must lie inside the matrix; under XOR it is
+            # simply cancelled out of it
+            if a.op != "xor" and any(p & ~r for p, r in zip(pat, a.rows)):
+                continue
+            rest = Affine.__new__(Affine)
+            rest.__dict__.update(a.__dict__)
+            rest.rows = [r ^ p if a.op == "xor" else r & ~p
+                         for r, p in zip(a.rows, pat)]
+            sub = _network_cost(rest)
+            for i in ISAS:
+                c, how = sub[i]
+                if how == "constant":
+                    extra = 1                  # the sar alone
+                else:
+                    # sar, then combine; AArch64 folds an asr operand
+                    extra = 1 if i == "arm" else 2
+                if c + extra < best[i][0]:
+                    best[i] = (c + extra, f"sar + {how}")
+    return best
+
+
+def _network_cost(a):
     """Upper bound for anything: one term per rotate or diagonal (shift, then
     mask unless the shift already clears the rest), then combine. AArch64
     folds a shift or rotate of the second operand into eor/orr, and ubfx/ubfiz
@@ -499,7 +580,8 @@ def classify(rec):
     if mp is not None:
         srcs = [j for j in mp if j is not None]
         if len(set(srcs)) < len(srcs):
-            return "broadcast"
+            sx = sext_field(a, mp)
+            return "sign-extend" if sx and sx[1] > 1 else "broadcast"
         ds = {o - j for o, j in enumerate(mp) if j is not None}
         if len(used) > 1:
             if all(o == a.input_of(j)[1] for o, j in enumerate(mp)
@@ -565,7 +647,17 @@ def _self_test():
     s0 = mk(32, _crypto_rows(32, _CRYPTO["sha256sig0"][1]), op="xor")
     ok &= check("sha256 sigma0", s0, "rv", 1)
     ok &= check("sha256 sigma0", s0, "arm", 3)
-    print("classes:", classify(rot), classify(bc), classify(zm), classify(mo),
+    sx = mk(64, [1 << (o if o < 32 else 31) for o in range(64)])
+    ok &= check("sext i32 -> i64", sx, "x86", 1)
+    ok &= check("sext i32 -> i64", sx, "rv", 1)
+    zs = mk(64, [1 << (o if o < 8 else 7) if o < 32 else 0
+                 for o in range(64)], inputs=[8])
+    ok &= check("zext(sext i8 -> i32)", zs, "x86", 1)
+    xs = mk(64, [(1 << o) | (1 << 63) if o < 63 else 0 for o in range(64)],
+            op="xor")
+    ok &= check("x ^ (x >>s 63)", xs, "arm", 1)
+    ok &= check("x ^ (x >>s 63)", xs, "x86", 2)
+    print("classes:", classify(sx), classify(rot), classify(bc), classify(zm), classify(mo),
           classify(cl))
     return ok
 

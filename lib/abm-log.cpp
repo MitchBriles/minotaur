@@ -131,6 +131,9 @@ void writeABMRecords(const vector<ABMUse> &uses, StringRef kind, StringRef srcIR
                   << EC.message() << "\n";
     return;
   }
+  // unbuffered: a record longer than the buffer would otherwise go out in
+  // several writes and interleave with other processes appending to the log
+  os.SetUnbuffered();
 
   for (auto &U : uses) {
     string line;
