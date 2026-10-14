@@ -381,6 +381,104 @@ def _sar_rows(a, k, s):
     return [1 << (off + min(o + s, w - 1)) for o in range(a.out)]
 
 
+def _gf_mul(x, c, poly):
+    r = 0
+    while c:
+        if c & 1:
+            r ^= x
+        x <<= 1
+        if x & 0x100:
+            x ^= poly
+        c >>= 1
+    return r
+
+
+def _gf_matrices(poly):
+    """8x8 block of multiplication by each constant, as 8 row masks indexed by
+    output bit: rows[o] has bit j when bit o of c*x depends on bit j of x."""
+    table = {}
+    for c in range(1, 256):
+        rows = [0] * 8
+        for j in range(8):
+            v = _gf_mul(1 << j, c, poly)
+            for o in range(8):
+                if v >> o & 1:
+                    rows[o] |= 1 << j
+        table[tuple(rows)] = c
+    return table
+
+
+GF_POLYS = {0x11B: "AES", 0x11D: "Reed-Solomon"}
+_GF = {p: _gf_matrices(p) for p in GF_POLYS}
+
+MIXCOL = ((2, 3, 1, 1), (1, 2, 3, 1), (1, 1, 2, 3), (3, 1, 1, 2))
+INVMIXCOL = ((14, 11, 13, 9), (9, 14, 11, 13), (13, 9, 14, 11),
+             (11, 13, 9, 14))
+
+
+def gf256_coeffs(a):
+    """(poly, coefficient matrix [out byte][in byte]) when the matrix is a
+    GF(2^8) matrix-vector product over bytes, else None."""
+    if a.op not in ("xor", "any") or a.out % 8 or a.inn % 8:
+        return None
+    if any(o % 8 for o in a.offs):
+        return None
+    nob, nib = a.out // 8, a.inn // 8
+    for poly, table in _GF.items():
+        coef = []
+        ok = True
+        for ob in range(nob):
+            row = []
+            for ib in range(nib):
+                blk = tuple((a.rows[ob * 8 + o] >> (ib * 8)) & 0xFF
+                            for o in range(8))
+                if not any(blk):
+                    row.append(0)
+                elif blk in table:
+                    row.append(table[blk])
+                else:
+                    ok = False
+                    break
+            if not ok:
+                break
+            coef.append(row)
+        if ok and any(c > 1 for r in coef for c in r):
+            return poly, coef
+    return None
+
+
+def rec_gf256(a):
+    """AES MixColumns (and its inverse) are single instructions on AArch64
+    (aesmc/aesimc) and partly on x86 (aesimc) and RISC-V (aes64im). Other
+    GF(2^8) matrices, as in erasure coding, have no single instruction: GFNI
+    multiplies bytes by a constant, so each distinct coefficient costs a
+    multiply, a byte shuffle and an xor."""
+    res = {}
+    g = gf256_coeffs(a)
+    if not g:
+        return res
+    poly, coef = g
+    if poly == 0x11B and len(coef) == 4 and all(len(r) == 4 for r in coef):
+        # any byte order: every row a rotation of the first, with the
+        # coefficients of MixColumns or of its inverse
+        rows = [tuple(r) for r in coef]
+        rots = {rows[0][k:] + rows[0][:k] for k in range(4)}
+        circulant = all(r in rots for r in rows) and len(set(rows)) == 4
+        for want, inv in ((sorted(MIXCOL[0]), False),
+                          (sorted(INVMIXCOL[0]), True)):
+            if circulant and sorted(rows[0]) == want:
+                res["arm"] = (3, ("aesimc" if inv else "aesmc") +
+                              " (via v-reg)")
+                res["x86"] = (3 if inv else 5,
+                              "aesimc (via xmm)" if inv else
+                              "aesdeclast+aesenc (via xmm)")
+                if inv:
+                    res["rv"] = (1, "aes64im (Zknd)")
+    terms = {c for r in coef for c in r if c > 1}
+    res.setdefault("x86", (2 + 3 * len(terms), "GFNI gf2p8mulb per coefficient"))
+    return res
+
+
 def network_cost(a):
     """The cheapest network, with or without one sign-replication term: an
     ashr of one input taken out first, as in x ^ (x >> 63) or the
@@ -551,7 +649,7 @@ def isa_costs(rec):
             for i, v in f(a, mp).items():
                 if i not in found or v[0] < found[i][0]:
                     found[i] = v
-    for f in (rec_multibit, rec_crypto):
+    for f in (rec_multibit, rec_crypto, rec_gf256):
         for i, v in f(a).items():
             if i not in found or v[0] < found[i][0]:
                 found[i] = v
@@ -599,6 +697,9 @@ def classify(rec):
         return "permutation"
     if len(set(nz)) == 1:
         return "predicate" if a.op != "xor" else "parity"
+    g = gf256_coeffs(a)
+    if g:
+        return f"gf256-linear ({GF_POLYS[g[0]]})"
     if a.op == "xor":
         return "xor-linear" + ("-binary" if len(used) > 1 else "")
     return "or-linear" + ("-binary" if len(used) > 1 else "")
@@ -657,6 +758,17 @@ def _self_test():
             op="xor")
     ok &= check("x ^ (x >>s 63)", xs, "arm", 1)
     ok &= check("x ^ (x >>s 63)", xs, "x86", 2)
+    # AES MixColumns over one i32 column, byte i = bits 8i..8i+7
+    mc_rows = [0] * 32
+    for ob in range(4):
+        for ib in range(4):
+            blk = _gf_matrices(0x11B)
+            inv = {v: k for k, v in blk.items()}[MIXCOL[ob][ib]]
+            for o in range(8):
+                mc_rows[ob * 8 + o] |= inv[o] << (ib * 8)
+    mc = mk(32, mc_rows, op="xor")
+    ok &= check("AES MixColumns", mc, "arm", 3)
+    print("gf256:", classify(mc))
     print("classes:", classify(sx), classify(rot), classify(bc), classify(zm), classify(mo),
           classify(cl))
     return ok
