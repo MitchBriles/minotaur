@@ -560,7 +560,7 @@ RegisterPass<SuperoptimizerLegacyPass> X("so", "Superoptimizer", false, false);
 
 namespace {
 
-struct SuperoptimizerPass : llvm::detail::PassInfoMixin<SuperoptimizerPass> {
+struct SuperoptimizerPass : llvm::OptionalPassInfoMixin<SuperoptimizerPass> {
   PreservedAnalyses run(llvm::Function &F, FunctionAnalysisManager &FAM) {
     //TargetLibraryInfo &TLI = FAM.getResult<TargetLibraryAnalysis>(F);
     PreservedAnalyses PA;
