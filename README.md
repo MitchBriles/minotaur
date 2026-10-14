@@ -266,9 +266,12 @@ it -- in about 15 seconds, rather than the much longer full `ninja check`:
 
     $HOME/minotaur/build/abm-check
 
-`-minotaur-abm-max-width=0` turns ABM enumeration off entirely, which is a
-quick way to tell whether a change in behaviour is coming from ABM or from
-somewhere else.
+`-minotaur-abm-mode=off` turns ABM off entirely (enumeration and extraction),
+which is a quick way to tell whether a change in behaviour is coming from ABM or
+from somewhere else. The general test suite runs this way; `abm-check` turns ABM
+back on. `-minotaur-abm-cost=K` sets what one ABM costs against ordinary
+instructions (which cost 2): at the default 1 it beats any single instruction,
+at 5 it has to replace about three.
 
 `tests/abm/` holds small `i8` samples covering shifts, rotates and
 `bitreverse`. Note that the matrix product sums with OR while the mask is
@@ -276,3 +279,35 @@ applied with XOR, so an XOR-linear transform such as `x ^ (x >> 3)`
 (`xorshift.ll`, `clmul3.ll`) is matched by putting the XOR in the mask operand:
 the result is `ABM(x, M, %x)` with a runtime mask, whose matrix describes only
 the shift. Such records are logged with `"mask": null`.
+
+### ABM census
+
+Synthesis asks the solver for each matrix, one cut at a time. To measure which
+affine bit manipulations programs perform at all, the census skips that:
+
+    $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/online.so \
+      -passes=minotaur -plugin-arg=minotaur,-minotaur-abm-census \
+      -plugin-arg=minotaur,-minotaur-abm-log=census.jsonl -disable-output foo.ll
+
+For every integer value it grows the largest pure expression DAG feeding it,
+concatenates the DAG's inputs (so binary and width-changing operations count,
+as rectangular matrices), recovers the matrix from basis vectors, and screens
+it on inputs built to break linearity, or on every reachable input when there
+are few enough. Nothing is rewritten and no SMT is involved, so a whole corpus
+takes minutes. Each record carries the region as a standalone `@src`. Flags:
+`-minotaur-abm-census-{depth,size,in-bits,min-size,table-bits,all}`.
+
+The rest of the pipeline works on those records, each stage memoized so reruns
+only do new work:
+
+    abm-collect -c -j N -m MB -o census.jsonl -f files.txt   # census, resumable
+    abm-llc.py --memo llc.jsonl census.jsonl                  # what llc emits
+    abm-verify.py --memo proof.jsonl census.jsonl             # alive-tv proofs
+    abm-report.py --verified proof.jsonl --llc llc.jsonl census.jsonl
+    abm-isa.py --self-test                                    # the ISA oracle
+
+`abm-pipeline -o DIR -f files.txt -j N` runs all four. `abm-isa.py` costs each
+matrix on x86-64, AArch64 and RISC-V by recognizing the families they implement
+directly; `abm-report.py` gives the class distribution, ISA coverage, what an
+ABM would save, and the residue. `abm-fetch-corpus.sh` and `abm-ext-corpus.sh`
+build the corpora. Results are in `FINDINGS.md`.
