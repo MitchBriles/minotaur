@@ -223,6 +223,11 @@ configure_file(
   @ONLY
 )
 configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-pipeline.sh.in"
+  "${PROJECT_BINARY_DIR}/abm-pipeline"
+  @ONLY
+)
+configure_file(
   "${PROJECT_SOURCE_DIR}/scripts/abm-rank.py"
   "${PROJECT_BINARY_DIR}/abm-rank.py"
   COPYONLY

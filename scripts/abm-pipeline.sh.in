@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
+# Distributed under the MIT license that can be found in the LICENSE file.
+#
+# The whole census, end to end, for a list of LLVM IR files:
+#
+#   1. abm-collect -c   every affine region each file computes
+#   2. abm-llc.py       what llc emits for each distinct region today
+#   3. abm-verify.py    alive-tv proof of each distinct region's matrix
+#   4. abm-report.py    classes, ISA coverage and the residue
+#
+# Every stage keeps a memo in OUT, so rerunning after an interruption, or
+# with more files appended to the list, only does the new work. Workers and
+# per-process memory are explicit because worst-case memory is their product;
+# run the whole thing under a cgroup limit, e.g.
+#
+#   systemd-run --user --scope -p MemoryMax=100G abm-pipeline -j 48 ...
+
+set -eu
+
+JOBS=4
+MEM_MB=2048
+PROOF_MB=4096
+OUT=""
+LIST=""
+TIMEOUT=300
+
+usage() {
+  cat <<EOF
+usage: abm-pipeline -o OUTDIR -f LIST [-j N] [-m MB] [-p MB] [-t SECS]
+
+  -o DIR   where census.jsonl, its manifest, the memos and report.txt go
+  -f LIST  IR files, one per line
+  -j N     parallel workers in every stage (default 4)
+  -m MB    address-space cap per opt / llc process (default 2048)
+  -p MB    address-space cap per alive-tv process (default 4096)
+  -t SECS  per-file census limit (default 300)
+EOF
+  exit 1
+}
+
+while getopts ":o:f:j:m:p:t:h" opt; do
+  case $opt in
+    o) OUT="$OPTARG" ;;
+    f) LIST="$OPTARG" ;;
+    j) JOBS="$OPTARG" ;;
+    m) MEM_MB="$OPTARG" ;;
+    p) PROOF_MB="$OPTARG" ;;
+    t) TIMEOUT="$OPTARG" ;;
+    *) usage ;;
+  esac
+done
+[ -z "$OUT" ] || [ -z "$LIST" ] && usage
+mkdir -p "$OUT"
+
+B="@PROJECT_BINARY_DIR@"
+export ALIVE_TV="${ALIVE_TV:-@ALIVE2_BUILD_DIR@/alive-tv}"
+export LLC="${LLC:-@LLVM_BINARY_DIR@/bin/llc}"
+
+echo "== census" >&2
+"$B/abm-collect" -c -j "$JOBS" -m "$MEM_MB" -t "$TIMEOUT" \
+  -o "$OUT/census.jsonl" -f "$LIST"
+
+echo "== llc" >&2
+python3 "$B/abm-llc.py" -j "$JOBS" --mem "$MEM_MB" --memo "$OUT/llc.jsonl" \
+  "$OUT/census.jsonl"
+
+echo "== proofs" >&2
+python3 "$B/abm-verify.py" -j "$JOBS" --mem "$PROOF_MB" --smt-to 20 \
+  --memo "$OUT/proof.jsonl" "$OUT/census.jsonl"
+
+echo "== report" >&2
+python3 "$B/abm-report.py" --verified "$OUT/proof.jsonl" --llc "$OUT/llc.jsonl" \
+  "$OUT/census.jsonl" > "$OUT/report.txt"
+python3 "$B/abm-report.py" --json --verified "$OUT/proof.jsonl" \
+  --llc "$OUT/llc.jsonl" "$OUT/census.jsonl" > "$OUT/residue.jsonl"
+echo "== wrote $OUT/report.txt and $OUT/residue.jsonl" >&2
