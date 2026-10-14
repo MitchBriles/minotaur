@@ -134,7 +134,8 @@ Slice::extractExpr(Value &v) {
   //   we will create an function argument for the def and replace the use
   //   with the argument.
   while (!worklist.empty()) {
-    auto &[w, depth] = worklist.front();
+    // copy: pop() destroys the element a reference would point into
+    auto [w, depth] = worklist.front();
     worklist.pop();
 
     if (depth >= config::slicer_max_depth)

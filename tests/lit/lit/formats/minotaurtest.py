@@ -8,11 +8,21 @@ import os, re, signal, string, subprocess
 
 ok_string = 'Transformation seems to be correct!'
 
-def executeCommand(command):
+class CommandTimeout(Exception):
+  pass
+
+def executeCommand(command, timeout=None):
+  # own session, so a timeout can kill opt-minotaur.sh and the opt under it
   p = subprocess.Popen(command,
                        stdout=subprocess.PIPE,
-                       stderr=subprocess.PIPE)
-  out,err = p.communicate()
+                       stderr=subprocess.PIPE,
+                       start_new_session=True)
+  try:
+    out,err = p.communicate(timeout=timeout or None)
+  except subprocess.TimeoutExpired:
+    os.killpg(p.pid, signal.SIGKILL)
+    p.communicate()
+    raise CommandTimeout()
   exitCode = p.wait()
 
   # Detect Ctrl-C in subprocess.
@@ -97,7 +107,10 @@ class MinotaurTest(TestFormat):
 
     cmd.append(test)
 
-    out, err, exitCode = executeCommand(cmd)
+    try:
+      out, err, exitCode = executeCommand(cmd, litConfig.maxIndividualTestTime)
+    except CommandTimeout:
+      return lit.Test.TIMEOUT, 'timed out after %ss' % litConfig.maxIndividualTestTime
     output = out + err
     output_lines = output.splitlines()
 
