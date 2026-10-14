@@ -315,6 +315,21 @@ def rec_multibit(a):
         put("x86", 3, "and+popcnt+and")
         put("arm", 4, "and+cnt (via v-reg)")
         put("rv", 3, "and+cpop+andi")
+    # smears: every bit below the highest set bit (x |= x >> 1 ... >> 16,
+    # the next-power-of-two idiom) is ~0 >> clz(x); every bit above the
+    # lowest set bit is x | -x
+    if a.op in ("or", "any") and len(used) == 1:
+        k = used[0]
+        w, off = a.widths[k], a.offs[k]
+        if a.out == w:
+            rows = [r >> off for r in a.rows]
+            if rows == [ones(w) & ~ones(o) for o in range(w)]:
+                for i, how in (("x86", "lzcnt+shrx"), ("arm", "clz+lsr"),
+                               ("rv", "clz+srl")):
+                    put(i, 2, how)
+            if rows == [ones(o + 1) for o in range(w)]:
+                for i in ISAS:
+                    put(i, 2, "neg+or")
     # orc.b: each byte becomes 0x00 or 0xff by OR of its own bits
     if a.op == "or" and len(used) == 1 and a.out % 8 == 0 and \
             a.out == a.widths[used[0]]:
@@ -769,6 +784,8 @@ def _self_test():
     mc = mk(32, mc_rows, op="xor")
     ok &= check("AES MixColumns", mc, "arm", 3)
     print("gf256:", classify(mc))
+    sm = mk(32, [ones(32) & ~ones(o) for o in range(32)], op="or")
+    ok &= check("smear below highest bit", sm, "x86", 2)
     print("classes:", classify(sx), classify(rot), classify(bc), classify(zm), classify(mo),
           classify(cl))
     return ok
