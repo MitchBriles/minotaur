@@ -13,7 +13,10 @@ abm-isa.py. The report shows:
   * the class distribution (sites, distinct operations, projects);
   * ISA coverage: the share of sites that need <= 1, 2, or >= 3 instructions
     on each ISA and on the best of them;
-  * the residue: operations needing >= --min-cost instructions on every ISA,
+  * what an ABM would save: (best ISA cost) - (ABM cost), where an ABM reads
+    at most two registers, so a region with k inputs costs max(1, k - 1);
+  * the residue: operations an ABM would do in --min-cost - 1 fewer
+    instructions than the best ISA,
     ranked by how many projects use them;
   * the most widespread small lookup tables (kind "table").
 
@@ -176,7 +179,9 @@ def main():
                 if lc.get(i) is not None and lc[i] < c[i][0]:
                     c[i] = (lc[i], "as llc emits it")
         best = min(v[0] for v in c.values())
-        info[k] = (isa.classify(g.rec), c, best)
+        nin = len(g.rec.get("inputs", [])) or 1
+        abm = max(1, nin - 1)
+        info[k] = (isa.classify(g.rec), c, best, abm, max(best - abm, 0))
 
     if not a.json:
         print(f"# {n} records, {len(census)} distinct affine operations, "
@@ -189,10 +194,10 @@ def main():
             c[0] += g.sites
             c[1] += 1
             c[2] |= set(g.projects)
-            if info[k][2] >= a.min_cost:
+            if info[k][4] >= a.min_cost - 1:
                 c[3] += g.sites
         print(f"{'class':22} {'sites':>7} {'distinct':>8} {'projects':>8} "
-              f"{'sites>=' + str(a.min_cost) + ' on best ISA':>22}")
+              f"{'sites ABM saves >=' + str(a.min_cost - 1):>22}")
         for name, (s, d, p, hard) in sorted(cls.items(),
                                             key=lambda e: -e[1][0]):
             print(f"{name:22} {s:7} {d:8} {len(p):8} {hard:22}")
@@ -208,6 +213,28 @@ def main():
                 b[bucket(cost)] += g.sites
             print(f"{name:8} " + " ".join(f"{100 * b[x] / total:6.1f}%"
                                            for x in ("<=1", "2", ">=3")))
+
+        # the same with every project weighted equally, so that one large
+        # code base (cvc5 alone is a quarter of the sites) cannot set it
+        psites = collections.Counter()
+        for g in census.values():
+            psites.update(g.projects)
+        print(f"\nISA coverage, each of {len(psites)} projects weighted "
+              f"equally:")
+        print(f"{'':8} {'<=1':>7} {'2':>7} {'>=3':>7} {'ABM saves>=2':>13}")
+        for name in isa.ISAS + ("best",):
+            b = collections.Counter()
+            for k, g in census.items():
+                cost = info[k][2] if name == "best" else info[k][1][name][0]
+                for p, n in g.projects.items():
+                    w = n / psites[p] / len(psites)
+                    b[bucket(cost)] += w
+                    if name == "best" and info[k][4] >= a.min_cost - 1:
+                        b["saves"] += w
+            extra = f" {100 * b['saves']:12.1f}%" if name == "best" else ""
+            print(f"{name:8} " + " ".join(f"{100 * b[x]:6.1f}%"
+                                           for x in ("<=1", "2", ">=3"))
+                  + extra)
 
         if llc:
             print(f"\nCompiled today (llc -O2), share of sites by instructions"
@@ -226,19 +253,51 @@ def main():
                     f"{100 * b[x] / total:6.1f}%" for x in ("<=1", "2", ">=3"))
                     + f" {100 * b['unknown'] / total:7.1f}%")
 
+        # what one ABM instruction would save over the best existing ISA:
+        # (best cost - 1) per site, statically and weighted by how often the
+        # block runs relative to its function's entry
+        sav = collections.defaultdict(lambda: [0, 0.0, 0, 0.0])
+        for k, g in census.items():
+            gain = info[k][4]
+            sav[info[k][0]][0] += gain * g.sites
+            sav[info[k][0]][1] += gain * g.freq
+            # a 2-instruction sequence is what macro-op fusion already
+            # covers; count separately what only an ABM would collapse
+            if gain >= a.min_cost - 1:
+                sav[info[k][0]][2] += gain * g.sites
+                sav[info[k][0]][3] += gain * g.freq
+        ts = sum(v[0] for v in sav.values()) or 1
+        tf = sum(v[1] for v in sav.values()) or 1
+        print(f"\nInstructions an ABM would save over the best ISA "
+              f"(best cost - max(1, inputs - 1), summed over sites):")
+        print(f"{'class':28} {'static':>9} {'share':>6} {'freq-wtd':>11} "
+              f"{'share':>6} {'from saves>=' + str(a.min_cost - 1) + ': static':>20}"
+              f" {'freq-wtd':>11}")
+        for name, (st, fq, st3, fq3) in sorted(sav.items(),
+                                               key=lambda e: -e[1][1]):
+            if st:
+                print(f"{name:28} {st:9} {100 * st / ts:5.1f}% {fq:11.1f} "
+                      f"{100 * fq / tf:5.1f}% {st3:20} {fq3:11.1f}")
+        print(f"{'total':28} {ts:9} {'':6} {tf:11.1f} {'':6} "
+              f"{sum(v[2] for v in sav.values()):20} "
+              f"{sum(v[3] for v in sav.values()):11.1f}")
+        print(f"per site: {ts / total:.3f} static, over {total} sites")
+
     # the residue
     res = [(k, g) for k, g in census.items()
-           if info[k][2] >= a.min_cost and len(g.projects) >= a.min_projects]
+           if info[k][4] >= a.min_cost - 1 and len(g.projects) >= a.min_projects]
     res.sort(key=lambda e: (-len(e[1].projects), -e[1].sites,
                             -info[e[0]][2]))
     if a.json:
         for k, g in res:
-            cl, c, best = info[k]
+            cl, c, best = info[k][:3][:3]
             print(json.dumps({
                 "class": cl, "op": g.rec.get("op"), "width": g.rec["width"],
                 "inputs": [i["w"] for i in g.rec.get("inputs", [])],
                 "matrix": g.rec["matrix"], "mask": g.rec["mask"],
                 "sites": g.sites, "projects": dict(g.projects),
+                "freq": round(g.freq, 3), "max_loop_depth": g.depth,
+                "gain": info[k][4], "best": best, "abm_cost": info[k][3],
                 "costs": {i: c[i][0] for i in c},
                 "how": {i: c[i][1] for i in c},
                 "functions": [f"{p}:{fn}" for (p, fn), _ in
@@ -249,10 +308,10 @@ def main():
                 "cut": g.rec.get("cut")}))
         return
 
-    print(f"\n## Residue: >= {a.min_cost} instructions on every ISA, "
-          f"in >= {a.min_projects} projects ({len(res)} operations)\n")
+    print(f"\n## Residue: an ABM saves >= {a.min_cost - 1} instructions over "
+          f"every ISA, in >= {a.min_projects} projects ({len(res)} operations)\n")
     for rank, (k, g) in enumerate(res[:a.top], 1):
-        cl, c, best = info[k]
+        cl, c, best = info[k][:3]
         r = g.rec
         ins = "+".join(str(i["w"]) for i in r.get("inputs", []))
         costs = "  ".join(f"{i}={c[i][0]} ({c[i][1]})" for i in isa.ISAS)
