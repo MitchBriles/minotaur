@@ -67,7 +67,7 @@ void collectABMUses(const Function &F, vector<ABMUse> &out, const LoopInfo *LI,
   }
 }
 
-static void writeJSONString(raw_ostream &os, StringRef s) {
+void writeJSONString(raw_ostream &os, StringRef s) {
   static const char hex[] = "0123456789abcdef";
   os << '"';
   for (char c : s) {

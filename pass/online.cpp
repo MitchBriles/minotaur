@@ -1,5 +1,6 @@
 // Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
 // Distributed under the MIT license that can be found in the LICENSE file.
+#include "abm-census.h"
 #include "abm-log.h"
 #include "config.h"
 #include "enumerator.h"
@@ -187,6 +188,44 @@ llvm::cl::opt<bool> abm_log_all(
                    "one that is applied"),
     llvm::cl::init(false));
 
+llvm::cl::opt<bool> abm_census(
+    "minotaur-abm-census",
+    llvm::cl::desc("minotaur: instead of synthesizing, log every affine bit "
+                   "manipulation the program computes (see abm-census.h); "
+                   "needs -minotaur-abm-log"),
+    llvm::cl::init(false));
+
+llvm::cl::opt<unsigned> census_depth(
+    "minotaur-abm-census-depth",
+    llvm::cl::desc("minotaur: operand edges a census region may span"),
+    llvm::cl::init(12));
+
+llvm::cl::opt<unsigned> census_size(
+    "minotaur-abm-census-size",
+    llvm::cl::desc("minotaur: most instructions in a census region"),
+    llvm::cl::init(64));
+
+llvm::cl::opt<unsigned> census_in_bits(
+    "minotaur-abm-census-in-bits",
+    llvm::cl::desc("minotaur: widest concatenated input of a census region"),
+    llvm::cl::init(128));
+
+llvm::cl::opt<unsigned> census_min_size(
+    "minotaur-abm-census-min-size",
+    llvm::cl::desc("minotaur: fewest instructions in a logged census region"),
+    llvm::cl::init(2));
+
+llvm::cl::opt<unsigned> census_table_bits(
+    "minotaur-abm-census-table-bits",
+    llvm::cl::desc("minotaur: log non-affine regions with at most this many "
+                   "unknown input bits as lookup tables (0 disables)"),
+    llvm::cl::init(8));
+
+llvm::cl::opt<bool> census_all(
+    "minotaur-abm-census-all",
+    llvm::cl::desc("minotaur: also log census regions nested in a larger one"),
+    llvm::cl::init(false));
+
 static bool dom_check(llvm::Value *V, DominatorTree &DT, llvm::Use &U) {
   if (auto I = dyn_cast<Instruction>(V)) {
     for (auto &op : I->operands()) {
@@ -365,6 +404,27 @@ optimize_function(llvm::Function &F, LoopInfo &LI, DominatorTree &DT,
   }
 
   smt::set_query_timeout(to_string(smt_to * 1000));
+
+  if (abm_census) {
+    CensusOptions CO;
+    CO.max_depth = census_depth;
+    CO.max_size = census_size;
+    CO.max_in_bits = census_in_bits;
+    CO.min_size = census_min_size;
+    CO.table_bits = census_table_bits;
+    CO.log_subsumed = census_all;
+    if (function_to)
+      CO.deadline = std::chrono::steady_clock::now() +
+                    std::chrono::seconds(function_to);
+    unsigned N = runABMCensus(F, LI, DT, BFI, CO);
+    debug() << "[online] census logged " << N << " region(s) in "
+            << F.getName() << "\n";
+    if (out_file != &errs()) {
+      out_file->flush();
+      delete out_file;
+    }
+    return false;
+  }
 
   redisContext *ctx = nullptr;
   if (enable_caching) {

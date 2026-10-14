@@ -74,6 +74,7 @@ find_package(Alive2)
 include_directories(${ALIVE2_SOURCE_DIR})
 
 set(SYNTHESIZER_SRC
+  "lib/abm-census.cpp"
   "lib/abm-log.cpp"
   "lib/alive-interface.cpp"
   "lib/enumerator.cpp"

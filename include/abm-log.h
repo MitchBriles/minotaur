@@ -9,6 +9,7 @@
 
 namespace llvm {
 class Function;
+class raw_ostream;
 class LoopInfo;
 class BlockFrequencyInfo;
 }
@@ -45,6 +46,9 @@ void collectABMUses(const llvm::Function &F, std::vector<ABMUse> &out,
 // Appends one JSON object per use to config::abm_log_path; a no-op when that
 // path is unset. Lines are written whole so concurrent opt processes can share
 // a log file. Negative costs are emitted as null.
+// JSON string literal with escaping, shared with the census writer.
+void writeJSONString(llvm::raw_ostream &os, llvm::StringRef s);
+
 void writeABMRecords(const std::vector<ABMUse> &uses, llvm::StringRef kind,
                      llvm::StringRef srcIR, int costBefore, int costAfter,
                      llvm::StringRef evidence = "");
