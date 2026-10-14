@@ -410,17 +410,119 @@ optional<Affine> extract(const Region &R, const APInt &KZ, const APInt &KO,
 
   A.Or = MaybeOr;
   A.Xor = MaybeXor;
-  for (unsigned k = 0; k < 256 && (A.Or || A.Xor); ++k) {
-    APInt X = k == 0 ? APInt::getAllOnes(In) : randomWord(In, RNG);
-    X = conform(X, KZ, KO);
+  auto check = [&](const APInt &X) {
     auto FX = eval(R, X, Vals);
     if (!FX)
-      return nullopt;
+      return false;
     if (A.Or && applyRows(A.Rows, X, A.B, false) != *FX)
       A.Or = false;
     if (A.Xor && applyRows(A.Rows, X, A.B, true) != *FX)
       A.Xor = false;
     ++A.Samples;
+    return true;
+  };
+
+  // Few enough free bits: check every reachable input, which is a proof.
+  unsigned FreeBits = Free.popcount();
+  if (FreeBits <= 12) {
+    SmallVector<unsigned, 12> Pos;
+    for (unsigned j = 0; j < In; ++j)
+      if (Free[j])
+        Pos.push_back(j);
+    for (uint64_t e = 0; e < (uint64_t(1) << FreeBits) && (A.Or || A.Xor);
+         ++e) {
+      APInt X = KO;
+      for (unsigned b = 0; b < FreeBits; ++b)
+        if (e >> b & 1)
+          X.setBit(Pos[b]);
+      if (!check(X))
+        return nullopt;
+    }
+    if (!A.Or && !A.Xor)
+      return nullopt;
+    return A;
+  }
+
+  // Otherwise sample. Uniform random inputs almost never hit the events that
+  // break linearity in real code -- two values being equal, a value matching
+  // a constant, a carry running the length of a word -- so most samples come
+  // from families built to hit them.
+  SmallVector<APInt, 8> Consts;
+  for (auto &N : R.Nodes)
+    for (auto &O : N.Ops)
+      if (O.K == Operand::Const && Consts.size() < 8)
+        Consts.push_back(O.C);
+
+  auto leafValue = [&](unsigned i, const APInt &V) {
+    unsigned W = R.Leaves[i]->getType()->getIntegerBitWidth();
+    return V.zextOrTrunc(W);
+  };
+  auto assemble = [&](auto &&Pick) {
+    APInt X(In, 0);
+    for (unsigned i = 0; i < R.Leaves.size(); ++i)
+      X.insertBits(Pick(i), R.Offsets[i]);
+    return conform(X, KZ, KO);
+  };
+
+  for (unsigned k = 0; k < 512 && (A.Or || A.Xor); ++k) {
+    APInt X;
+    switch (k % 8) {
+    case 0: // uniform, and all ones first
+      X = conform(k == 0 ? APInt::getAllOnes(In) : randomWord(In, RNG), KZ,
+                  KO);
+      break;
+    case 1: { // every input the same value: equality tests
+      APInt V = randomWord(64, RNG);
+      if (k & 8)
+        V &= randomWord(64, RNG) & randomWord(64, RNG);
+      X = assemble([&](unsigned i) { return leafValue(i, V); });
+      break;
+    }
+    case 2: // sparse
+      X = conform(randomWord(In, RNG) & randomWord(In, RNG) &
+                      randomWord(In, RNG) & randomWord(In, RNG),
+                  KZ, KO);
+      break;
+    case 3: // dense
+      X = conform(randomWord(In, RNG) | randomWord(In, RNG) |
+                      randomWord(In, RNG) | randomWord(In, RNG),
+                  KZ, KO);
+      break;
+    case 4: // small values: compares against small bounds
+      X = assemble([&](unsigned i) {
+        return leafValue(i, APInt(64, RNG() % 17));
+      });
+      break;
+    case 5: { // runs of ones: carries and borrows across the word
+      X = assemble([&](unsigned i) {
+        unsigned W = R.Leaves[i]->getType()->getIntegerBitWidth();
+        unsigned Len = RNG() % (W + 1), At = RNG() % W;
+        APInt V = APInt::getLowBitsSet(W, Len).shl(At);
+        return (RNG() & 1) ? V : ~V;
+      });
+      break;
+    }
+    default: { // near a constant of the region, else uniform
+      if (Consts.empty()) {
+        X = conform(randomWord(In, RNG), KZ, KO);
+        break;
+      }
+      const APInt &C = Consts[RNG() % Consts.size()];
+      int Delta = int(RNG() % 3) - 1;
+      unsigned Pick = RNG() % R.Leaves.size();
+      X = assemble([&](unsigned i) {
+        unsigned W = R.Leaves[i]->getType()->getIntegerBitWidth();
+        // the others small half the time, so a disjunction with another
+        // compare does not mask this one
+        if (i != Pick)
+          return (RNG() & 1) ? randomWord(W, RNG) : APInt(W, RNG() % 17);
+        APInt V = C.zextOrTrunc(W);
+        return Delta < 0 ? V - 1 : Delta > 0 ? V + 1 : V;
+      });
+    }
+    }
+    if (!check(X))
+      return nullopt;
   }
   if (!A.Or && !A.Xor)
     return nullopt;
@@ -428,7 +530,9 @@ optional<Affine> extract(const Region &R, const APInt &KZ, const APInt &KO,
 }
 
 // A standalone function computing the region: one argument per leaf, known
-// bits imposed on entry, the root returned. This is what gets verified.
+// bits stated as assumptions, the root returned. This is what gets verified,
+// and what gets compiled to see what existing ISAs need: an assume constrains
+// the proof but emits no code.
 string regionIR(const Region &R, const vector<KnownBits> &Known) {
   LLVMContext &Ctx = R.Root->getContext();
   Module M("cut", Ctx);
@@ -445,10 +549,13 @@ string regionIR(const Region &R, const vector<KnownBits> &Known) {
   for (unsigned i = 0; i < R.Leaves.size(); ++i) {
     Value *A = Fn->getArg(i);
     const KnownBits &K = Known[i];
-    if (!K.Zero.isZero())
-      A = IRB.CreateAnd(A, ConstantInt::get(A->getType(), ~K.Zero));
-    if (!K.One.isZero())
-      A = IRB.CreateOr(A, ConstantInt::get(A->getType(), K.One));
+    APInt Mask = K.Zero | K.One;
+    if (!Mask.isZero()) {
+      Type *T = A->getType();
+      auto *Masked = IRB.CreateAnd(A, ConstantInt::get(T, Mask));
+      IRB.CreateAssumption(
+          IRB.CreateICmpEQ(Masked, ConstantInt::get(T, K.One)));
+    }
     VM[R.Leaves[i]] = A;
   }
   for (auto *I : R.Insts) {
@@ -474,8 +581,12 @@ string regionIR(const Region &R, const vector<KnownBits> &Known) {
   raw_string_ostream OS(S);
   Fn->print(OS);
   for (auto &D : M.functions())
-    if (D.isDeclaration())
+    if (D.isDeclaration()) {
+      // attribute groups are not printed with a lone function, and a
+      // dangling #N would not parse
+      D.setAttributes(AttributeList());
       OS << D;
+    }
   OS.flush();
   return S;
 }

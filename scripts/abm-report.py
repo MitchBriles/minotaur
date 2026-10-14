@@ -117,7 +117,13 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawTextHelpFormatter)
     ap.add_argument("logs", nargs="+")
-    ap.add_argument("--verified", help="abm-verify.py memo to annotate with")
+    ap.add_argument("--verified",
+                    help="abm-verify.py memo: refuted operations are dropped "
+                         "(random screening can miss carries that rarely "
+                         "propagate), and the rest are annotated")
+    ap.add_argument("--proved-only", action="store_true",
+                    help="with --verified, keep only operations proved at "
+                         "some site")
     ap.add_argument("--min-projects", type=int, default=2)
     ap.add_argument("--min-cost", type=int, default=3,
                     help="residue threshold, in instructions on the best ISA")
@@ -135,6 +141,16 @@ def main():
 
     n, groups = load(a.logs, memo)
     census = {k: g for k, g in groups.items() if k[0] != "table"}
+    if memo:
+        dropped = [k for k, g in census.items() if g.verdicts["refuted"]]
+        for k in dropped:
+            del census[k]
+        if a.proved_only:
+            for k in [k for k, g in census.items()
+                      if not g.verdicts["verified"]]:
+                del census[k]
+        if not a.json:
+            print(f"# dropped {len(dropped)} refuted operation(s)")
     tables = {k: g for k, g in groups.items() if k[0] == "table"}
     projects = set()
     for g in groups.values():
