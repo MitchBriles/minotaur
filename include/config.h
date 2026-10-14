@@ -33,6 +33,11 @@ extern unsigned abm_max_width;
 // Same for the XOR semiring (@ABMX).
 extern unsigned abm_xor_max_width;
 
+// Approximate cost of one ABM call; ordinary instructions cost 2. At the
+// default 1 an ABM beats any single instruction; 5 means it has to replace
+// about three of them.
+extern unsigned abm_cost;
+
 // Recover the ABM matrix by evaluating the cut on basis vectors instead of
 // asking the solver to search for it. Cheap and not width limited; turn off to
 // compare against pure enumeration.

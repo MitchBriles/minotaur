@@ -109,7 +109,7 @@ llvm_map_components_to_libnames(LLVM_LIBS
 
 add_library(cost STATIC "lib/cost.cpp"
                         "${PROJECT_BINARY_DIR}/cost-command.h")
-target_link_libraries(cost PRIVATE ${LLVM_LIBS})
+target_link_libraries(cost PRIVATE ${LLVM_LIBS} config)
 
 add_library(utils STATIC "lib/utils.cpp")
 target_link_libraries(utils PRIVATE ${LLVM_LIBS} ${HIREDIS_LIBRARY})

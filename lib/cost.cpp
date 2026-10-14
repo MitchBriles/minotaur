@@ -1,6 +1,7 @@
 // Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
 // Distributed under the MIT license that can be found in the LICENSE file.
 #include "cost.h"
+#include "config.h"
 #include "utils.h"
 #include "cost-command.h"
 
@@ -140,7 +141,7 @@ unsigned get_approx_cost(llvm::Function *F) {
         auto CalledF = CI->getCalledFunction();
         if (CalledF) {
           if (CalledF->getName().starts_with("ABM")) {
-            cost += 1;
+            cost += config::abm_cost;
             continue;
           }
           if (CalledF->getName().starts_with("__fksv")) {

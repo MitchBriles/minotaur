@@ -172,6 +172,12 @@ llvm::cl::opt<unsigned> abm_xor_max_width(
                    "harder to solve than the OR form"),
     llvm::cl::init(16), llvm::cl::value_desc("bits"));
 
+llvm::cl::opt<unsigned> abm_cost(
+    "minotaur-abm-cost",
+    llvm::cl::desc("minotaur: approximate cost of one ABM call (ordinary "
+                   "instructions cost 2)"),
+    llvm::cl::init(1));
+
 llvm::cl::opt<string> abm_mode(
     "minotaur-abm-mode",
     llvm::cl::desc("minotaur: which ABM semirings to enumerate: "
@@ -379,6 +385,7 @@ optimize_function(llvm::Function &F, LoopInfo &LI, DominatorTree &DT,
   config::slice_to = slice_to;
   config::abm_max_width = abm_max_width;
   config::abm_xor_max_width = abm_xor_max_width;
+  config::abm_cost = abm_cost;
   if (abm_mode == "or")
     config::abm_mode = config::ABM_MODE_OR;
   else if (abm_mode == "xor")
