@@ -35,6 +35,9 @@ fi
 
 echo "abm-check: ${#subset[@]} ABM-eligible tests (of $(ls "$TESTS"/*.syn.ll | wc -l) top-level)" >&2
 
+# opt-minotaur.sh leaves ABM off unless asked
+export MINOTAUR_ABM=1
+
 # the lit format looks for opt-minotaur.sh in the working directory
 cd "@PROJECT_BINARY_DIR@" || exit 1
 exec python3 "$LIT" -s --no-progress-bar --timeout="$TIMEOUT" \

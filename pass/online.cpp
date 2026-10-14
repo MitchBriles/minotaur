@@ -174,8 +174,8 @@ llvm::cl::opt<unsigned> abm_xor_max_width(
 llvm::cl::opt<string> abm_mode(
     "minotaur-abm-mode",
     llvm::cl::desc("minotaur: which ABM semirings to enumerate: "
-                   "or (@ABM), xor (@ABMX), or both"),
-    llvm::cl::init("both"), llvm::cl::value_desc("or|xor|both"));
+                   "or (@ABM), xor (@ABMX), both, or off"),
+    llvm::cl::init("both"), llvm::cl::value_desc("or|xor|both|off"));
 
 llvm::cl::opt<string> abm_log("minotaur-abm-log",
   llvm::cl::desc("minotaur: append synthesized ABM matrices to this JSONL file"),
@@ -346,8 +346,10 @@ optimize_function(llvm::Function &F, LoopInfo &LI, DominatorTree &DT,
     config::abm_mode = config::ABM_MODE_XOR;
   else if (abm_mode == "both")
     config::abm_mode = config::ABM_MODE_BOTH;
+  else if (abm_mode == "off")
+    config::abm_mode = 0;
   else
-    report_fatal_error("minotaur-abm-mode must be one of: or, xor, both");
+    report_fatal_error("minotaur-abm-mode must be one of: or, xor, both, off");
   config::abm_log_path = abm_log;
   config::abm_log_all = abm_log_all;
   config::current_function = F.getName().str();

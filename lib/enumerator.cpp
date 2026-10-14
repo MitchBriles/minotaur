@@ -68,6 +68,10 @@ void Enumerator::findInputs(llvm::Function &F,
                             llvm::Instruction *root,
                             llvm::DominatorTree &DT) {
   for (auto &A : F.args()) {
+    // the slicer appends an unused i16 argument to every cut; it is not a
+    // value of the original program and codegen cannot map it back
+    if (A.use_empty())
+      continue;
     auto T = make_unique<Var>(&A);
     values.emplace_back(T.get());
     exprs.emplace_back(std::move(T));
@@ -315,7 +319,8 @@ bool Enumerator::getSketches(llvm::Value *V, vector<Sketch> &sketches) {
   // Synthesizing the matrix gets expensive as width grows, so each semiring is
   // capped separately; see config::abm_max_width / abm_xor_max_width.
   vector<ABM::Op> abm_ops;
-  if (!expected.isFP() && expected.getLane() == 1) {
+  // An i1 "matrix" is a single and/or/xor priced as one ABM, which is noise.
+  if (!expected.isFP() && expected.getLane() == 1 && expected.getBits() > 1) {
     if ((config::abm_mode & config::ABM_MODE_OR) &&
         expected.getBits() <= config::abm_max_width)
       abm_ops.push_back(ABM::OR);
@@ -983,7 +988,10 @@ vector<Rewrite> Enumerator::solve(llvm::Function &F, llvm::Instruction *I) {
   llvm::Triple Triple = llvm::Triple(F.getParent()->getTargetTriple());
   llvm::TargetLibraryInfoWrapperPass TLI(Triple);
 
-  unsigned costBefore = get_machine_cost(&F);
+  // with machine cost ignored, both sides are compared in approx-cost units,
+  // and the clang + llvm-mca round trip per slice is skipped entirely
+  unsigned costBefore = config::ignore_machine_cost ? src_cost
+                                                    : get_machine_cost(&F);
 
   unsigned Width = I->getType()->getScalarSizeInBits();
   llvm::KnownBits KnownI(Width);
@@ -1256,7 +1264,9 @@ push:
               << ", original cost (uops=" << costBefore << "), \n"
               << *Tgt << "\n";
 
-      if (!costAfter || !costBefore) {
+      // a zero machine cost means llvm-mca failed; an approx cost of zero is
+      // a legitimate constant rewrite
+      if (!config::ignore_machine_cost && (!costAfter || !costBefore)) {
         debug() << "[enumerator] cost is zero, skip\n";
       } else if (config::ignore_machine_cost || costAfter < costBefore) {
         debug () << "[enumerator] successfully synthesized rhs\n";

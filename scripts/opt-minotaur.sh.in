@@ -13,6 +13,10 @@ set -e
 #TV_REPORT_DIR=-plugin-arg=minotaur,-minotaur-report-dir=@CMAKE_BINARY_DIR@/logs
 TV_SMT_TO=-plugin-arg=minotaur,-minotaur-query-to=20000
 DEBUG=true
+# ABM rewrites are cheap enough to win almost any cut, so the general tests
+# run without them; abm-check sets MINOTAUR_ABM=1
+ABM_MODE=off
+[[ "${MINOTAUR_ABM:-0}" == 1 ]] && ABM_MODE=both
 
 
 SKIP=0
@@ -34,6 +38,7 @@ if [[ $SKIP == 0 ]]; then
   -plugin-arg=minotaur,-minotaur-debug-codegen=false \
   -plugin-arg=minotaur,-minotaur-debug-enumerator=$DEBUG \
   -plugin-arg=minotaur,-minotaur-debug-tv=true \
+  -plugin-arg=minotaur,-minotaur-abm-mode=$ABM_MODE \
   #-plugin-arg=minotaur,-minotaur-no-infer=true \
   $TV_REPORT_DIR
 else

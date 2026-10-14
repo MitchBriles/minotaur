@@ -1,4 +1,4 @@
-; CHECK: call half @llvm.maximum.f16(half %x, half 0xH3C00)
+; CHECK: call half @llvm.maximum.f16(half %x, half 1.000000e+00)
 define half @maximum_f16_1_maximum_p0_val(half %x) {
   %y = call half @llvm.maximum.f16(half 0.0, half %x)
   %z = call half @llvm.maximum.f16(half %y, half 1.0)
