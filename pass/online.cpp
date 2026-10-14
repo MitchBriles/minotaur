@@ -599,13 +599,26 @@ void passBuilderCallback(PassBuilder &PB) {
       });
 }
 
+// opt loads plugins after parsing its own command line, so our cl::opts
+// arrive here instead, from -plugin-arg=minotaur,<arg>
+Error parseArguments(ArrayRef<const char *> Args) {
+  SmallVector<const char *> Argv = {"minotaur"};
+  append_range(Argv, Args);
+  std::string Msg;
+  raw_string_ostream OS(Msg);
+  if (!cl::ParseCommandLineOptions(Argv.size(), Argv.data(), "", &OS))
+    return createStringError(StringRef(Msg).trim());
+  return Error::success();
+}
+
 PassPluginLibraryInfo getMinotaurPassInfo() {
   llvm::PassPluginLibraryInfo PPLI;
 
   PPLI.APIVersion = LLVM_PLUGIN_API_VERSION;
-  PPLI.PluginName = "MinotaurPass";
+  PPLI.PluginName = "minotaur";
   PPLI.PluginVersion = LLVM_VERSION_STRING;
   PPLI.RegisterPassBuilderCallbacks = passBuilderCallback;
+  PPLI.ParseArguments = parseArguments;
 
   return PPLI;
 }

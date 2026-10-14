@@ -86,6 +86,11 @@ command
 
     $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/online.so -passes="minotaur" <LLVM bitcode>
 
+`opt` loads plugins after parsing its own command line, so Minotaur's
+options must be passed through `-plugin-arg=minotaur,<option>`, e.g.
+`-plugin-arg=minotaur,-minotaur-enable-caching=false`. Under `clang`,
+`-mllvm <option>` still works.
+
 For C/C++ programs, we have a drop-in replacement of C/C++ compiler.
 Users can call `minotaur-cc` or `minotaur-c++` in the `build`
 directory to compile C/C++ programs. Minotaur pass is disabled by
@@ -141,7 +146,7 @@ matrices programs actually use, pass `-minotaur-abm-log` and Minotaur appends
 one JSON record per synthesized ABM to that file:
 
     $HOME/llvm/build/bin/opt -load-pass-plugin $HOME/minotaur/build/online.so \
-      -passes=minotaur -minotaur-abm-log=abm.jsonl <LLVM bitcode>
+      -passes=minotaur -plugin-arg=minotaur,-minotaur-abm-log=abm.jsonl <LLVM bitcode>
 
 Records are appended, never truncated, and each line is written whole, so
 parallel builds can share one log. `abm-collect` wraps this for a list of IR
@@ -149,7 +154,8 @@ files:
 
     $HOME/minotaur/build/abm-collect -o abm.jsonl tests/abm/*.ll
 
-`-x` passes extra flags through to `opt`, which is how the semiring and width caps are selected
+`-x` passes extra flags through to `opt`, wrapping any `-minotaur-*` flag in
+`-plugin-arg=minotaur,`, which is how the semiring and width caps are selected
 for a run:
 
     $HOME/minotaur/build/abm-collect -o abm.jsonl -a \

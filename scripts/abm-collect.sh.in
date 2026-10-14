@@ -25,7 +25,8 @@ usage: abm-collect [-o LOG] [-j N] [-t SECS] [-s SECS] [-a] [-x FLAGS] <file.ll>
   -s SECS  Minotaur's per-slice limit, -minotaur-slice-to (default 300)
   -a       also log verified rewrites that lost on cost (kind="candidate")
   -x FLAGS extra flags for opt, e.g. -x '-minotaur-abm-mode=xor
-           -minotaur-abm-xor-max-width=32'; repeatable
+           -minotaur-abm-xor-max-width=32'; repeatable. -minotaur-* flags are
+           routed to the plugin with -plugin-arg=minotaur,
 
 The log is appended to, never truncated, so repeated runs accumulate. Rank it
 with:  abm-rank.py \$LOG
@@ -64,8 +65,16 @@ kill_tree() {
 # absolute, so worker subshells resolve it the same way
 case "$LOG" in /*) ;; *) LOG="$PWD/$LOG" ;; esac
 
-EXTRA="$USER_FLAGS"
-[ "$ALL" != "0" ] && EXTRA="$EXTRA -minotaur-abm-log-all"
+[ "$ALL" != "0" ] && USER_FLAGS="$USER_FLAGS -minotaur-abm-log-all"
+
+# opt loads plugins after parsing its own flags, so ours go through -plugin-arg
+EXTRA=""
+for flag in $USER_FLAGS; do
+  case $flag in
+    -minotaur-*) EXTRA="$EXTRA -plugin-arg=minotaur,$flag" ;;
+    *) EXTRA="$EXTRA $flag" ;;
+  esac
+done
 
 run_one() {
   local f="$1"
@@ -73,10 +82,10 @@ run_one() {
   timeout "$TIMEOUT" @LLVM_BINARY_DIR@/bin/opt \
     -load-pass-plugin=@ONLINE_PASS@ \
     -passes=minotaur \
-    -minotaur-enable-caching=false \
-    -minotaur-ignore-machine-cost=true \
-    -minotaur-slice-to="$SLICE_TO" \
-    -minotaur-abm-log="$LOG" \
+    -plugin-arg=minotaur,-minotaur-enable-caching=false \
+    -plugin-arg=minotaur,-minotaur-ignore-machine-cost=true \
+    -plugin-arg=minotaur,-minotaur-slice-to="$SLICE_TO" \
+    -plugin-arg=minotaur,-minotaur-abm-log="$LOG" \
     $EXTRA \
     -S "$f" -o /dev/null >/dev/null 2>&1
   local rc=$?
