@@ -40,6 +40,7 @@ def _load(name, file):
 
 isa = _load("abm_isa", "abm-isa.py")
 ver = _load("abm_verify", "abm-verify.py")
+llcm = _load("abm_llc", "abm-llc.py")
 
 
 def project_of(src):
@@ -124,6 +125,7 @@ def main():
     ap.add_argument("--proved-only", action="store_true",
                     help="with --verified, keep only operations proved at "
                          "some site")
+    ap.add_argument("--llc", help="abm-llc.py memo: add what llc emits today")
     ap.add_argument("--min-projects", type=int, default=2)
     ap.add_argument("--min-cost", type=int, default=3,
                     help="residue threshold, in instructions on the best ISA")
@@ -138,6 +140,13 @@ def main():
             for line in f:
                 e = json.loads(line)
                 memo[e["key"]] = e["verdict"].split(":")[0]
+
+    llc = {}
+    if a.llc:
+        with open(a.llc) as f:
+            for line in f:
+                e = json.loads(line)
+                llc[e["key"]] = e["llc"]
 
     n, groups = load(a.logs, memo)
     census = {k: g for k, g in groups.items() if k[0] != "table"}
@@ -156,10 +165,16 @@ def main():
     for g in groups.values():
         projects |= set(g.projects)
 
-    # cost and class once per distinct operation
+    # cost and class once per distinct operation; what llc emits is a real
+    # implementation, so it caps the oracle's estimate
     info = {}
     for k, g in census.items():
-        c = isa.isa_costs(g.rec)
+        c = dict(isa.isa_costs(g.rec))
+        lc = llc.get(llcm.cut_key(g.rec.get("cut", "")))
+        if lc:
+            for i in isa.ISAS:
+                if lc.get(i) is not None and lc[i] < c[i][0]:
+                    c[i] = (lc[i], "as llc emits it")
         best = min(v[0] for v in c.values())
         info[k] = (isa.classify(g.rec), c, best)
 
@@ -194,6 +209,23 @@ def main():
             print(f"{name:8} " + " ".join(f"{100 * b[x] / total:6.1f}%"
                                            for x in ("<=1", "2", ">=3")))
 
+        if llc:
+            print(f"\nCompiled today (llc -O2), share of sites by instructions"
+                  f" emitted:")
+            print(f"{'':8} {'<=1':>7} {'2':>7} {'>=3':>7} {'unknown':>8}")
+            for name in isa.ISAS + ("best",):
+                b = collections.Counter()
+                for k, g in census.items():
+                    c = llc.get(llcm.cut_key(g.rec.get("cut", "")))
+                    if not c or any(v is None for v in c.values()):
+                        b["unknown"] += g.sites
+                        continue
+                    v = min(c.values()) if name == "best" else c[name]
+                    b[bucket(v)] += g.sites
+                print(f"{name:8} " + " ".join(
+                    f"{100 * b[x] / total:6.1f}%" for x in ("<=1", "2", ">=3"))
+                    + f" {100 * b['unknown'] / total:7.1f}%")
+
     # the residue
     res = [(k, g) for k, g in census.items()
            if info[k][2] >= a.min_cost and len(g.projects) >= a.min_projects]
@@ -212,7 +244,9 @@ def main():
                 "functions": [f"{p}:{fn}" for (p, fn), _ in
                               g.functions.most_common(8)],
                 "region_ops": g.ops.most_common(1)[0][0],
-                "verdicts": dict(g.verdicts), "cut": g.rec.get("cut")}))
+                "verdicts": dict(g.verdicts),
+                "llc": llc.get(llcm.cut_key(g.rec.get("cut", ""))),
+                "cut": g.rec.get("cut")}))
         return
 
     print(f"\n## Residue: >= {a.min_cost} instructions on every ISA, "
@@ -226,6 +260,10 @@ def main():
               f"sites={g.sites} projects={len(g.projects)} "
               f"maxdepth={g.depth}")
         print(f"    {costs}")
+        lc = llc.get(llcm.cut_key(r.get("cut", "")))
+        if lc:
+            print("    llc today: " + "  ".join(f"{i}={lc[i]}"
+                                                for i in isa.ISAS))
         print(f"    projects: " + ", ".join(f"{p}({n})" for p, n in
                                          g.projects.most_common(8)))
         print(f"    e.g.: " + ", ".join(f"{p}:{fn}" for (p, fn), _ in

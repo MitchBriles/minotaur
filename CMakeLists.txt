@@ -247,6 +247,11 @@ configure_file(
   "${PROJECT_BINARY_DIR}/abm-report.py"
   COPYONLY
 )
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-llc.py"
+  "${PROJECT_BINARY_DIR}/abm-llc.py"
+  COPYONLY
+)
 
 if (NOT DEFINED TEST_NTHREADS)
   ProcessorCount(TEST_NTHREADS)
