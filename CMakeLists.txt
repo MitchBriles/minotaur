@@ -232,6 +232,11 @@ configure_file(
   "${PROJECT_BINARY_DIR}/abm-mincost.py"
   COPYONLY
 )
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-verify.py"
+  "${PROJECT_BINARY_DIR}/abm-verify.py"
+  COPYONLY
+)
 
 if (NOT DEFINED TEST_NTHREADS)
   ProcessorCount(TEST_NTHREADS)
