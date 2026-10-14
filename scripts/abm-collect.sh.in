@@ -13,16 +13,29 @@ ALL="${ABM_LOG_ALL:-0}"
 JOBS="${JOBS:-1}"
 TIMEOUT="${TIMEOUT:-900}"
 SLICE_TO="${SLICE_TO:-300}"
+MEM_MB="${MEM_MB:-4096}"
+CENSUS=0
+MANIFEST=""
+LIST=""
 
 usage() {
   cat <<EOF
-usage: abm-collect [-o LOG] [-j N] [-t SECS] [-s SECS] [-a] [-x FLAGS] <file.ll> ...
+usage: abm-collect [-o LOG] [-j N] [-t SECS] [-s SECS] [-m MB] [-c] [-a]
+                   [-x FLAGS] [-d MANIFEST] [-f LIST] <file.ll> ...
 
   -o LOG   append records to LOG (default: \$ABM_LOG, else abm.jsonl)
   -j N     run N files concurrently (default 1); the log is append-safe
   -t SECS  wall-clock limit per file (default 900); real code can otherwise
            run for hours on a single translation unit
   -s SECS  Minotaur's per-slice limit, -minotaur-slice-to (default 300)
+  -m MB    address-space cap per opt process (default 4096); with -j N the
+           worst case is N * MB, so size the pair to the machine
+  -c       census mode (-minotaur-abm-census): log every affine region the
+           program computes, without synthesis or SMT
+  -d FILE  done-manifest (default LOG.done): one "status secs file" line per
+           finished file; files already listed are skipped, so an interrupted
+           run resumes where it stopped
+  -f LIST  read input files from LIST, one per line, as well as the arguments
   -a       also log verified rewrites that lost on cost (kind="candidate")
   -x FLAGS extra flags for opt, e.g. -x '-minotaur-abm-mode=xor
            -minotaur-abm-xor-max-width=32'; repeatable. -minotaur-* flags are
@@ -36,8 +49,12 @@ EOF
 
 USER_FLAGS="${ABM_FLAGS:-}"
 
-while getopts ":o:j:t:s:x:ah" opt; do
+while getopts ":o:j:t:s:m:d:f:x:cah" opt; do
   case $opt in
+    m) MEM_MB="$OPTARG" ;;
+    d) MANIFEST="$OPTARG" ;;
+    f) LIST="$OPTARG" ;;
+    c) CENSUS=1 ;;
     o) LOG="$OPTARG" ;;
     j) JOBS="$OPTARG" ;;
     t) TIMEOUT="$OPTARG" ;;
@@ -50,7 +67,7 @@ while getopts ":o:j:t:s:x:ah" opt; do
 done
 shift $((OPTIND - 1))
 
-[ $# -eq 0 ] && usage
+[ $# -eq 0 ] && [ -z "$LIST" ] && usage
 
 # A kill must take the xargs workers and their opt processes with it; the
 # xargs command line does not mention this script, so killing by name leaves
@@ -64,8 +81,12 @@ kill_tree() {
 
 # absolute, so worker subshells resolve it the same way
 case "$LOG" in /*) ;; *) LOG="$PWD/$LOG" ;; esac
+[ -z "$MANIFEST" ] && MANIFEST="$LOG.done"
+case "$MANIFEST" in /*) ;; *) MANIFEST="$PWD/$MANIFEST" ;; esac
+touch "$MANIFEST"
 
 [ "$ALL" != "0" ] && USER_FLAGS="$USER_FLAGS -minotaur-abm-log-all"
+[ "$CENSUS" != "0" ] && USER_FLAGS="$USER_FLAGS -minotaur-abm-census"
 
 # opt loads plugins after parsing its own flags, so ours go through -plugin-arg
 EXTRA=""
@@ -79,7 +100,13 @@ done
 run_one() {
   local f="$1"
   local start=$SECONDS
-  timeout "$TIMEOUT" @LLVM_BINARY_DIR@/bin/opt \
+  # IR from older LLVMs can carry alias-scope metadata today's verifier
+  # rejects; it is irrelevant here, so strip it on the way in
+  local errf
+  errf=$(mktemp)
+  sed -E 's/, !(alias\.scope|noalias) ![0-9]+//g' "$f" |
+    prlimit --as=$((MEM_MB << 20)) \
+    timeout -k 10 "$TIMEOUT" @LLVM_BINARY_DIR@/bin/opt \
     -load-pass-plugin=@ONLINE_PASS@ \
     -passes=minotaur \
     -plugin-arg=minotaur,-minotaur-enable-caching=false \
@@ -87,16 +114,38 @@ run_one() {
     -plugin-arg=minotaur,-minotaur-slice-to="$SLICE_TO" \
     -plugin-arg=minotaur,-minotaur-abm-log="$LOG" \
     $EXTRA \
-    -S "$f" -o /dev/null >/dev/null 2>&1
-  local rc=$?
+    -disable-output - >/dev/null 2>"$errf"
+  local rc=${PIPESTATUS[1]}
+  local err
+  err=$(tail -c 2000 "$errf")
+  rm -f "$errf"
+  local st
   case $rc in
-    0)   echo "[abm-collect] ok      $((SECONDS-start))s  $f" >&2 ;;
-    124) echo "[abm-collect] timeout $((SECONDS-start))s  $f" >&2 ;;
-    *)   echo "[abm-collect] rc=$rc  $((SECONDS-start))s  $f" >&2 ;;
+    0)       st=ok ;;
+    124|137) st=timeout ;;
+    *)       st="rc=$rc" ;;
   esac
+  case $err in
+    *"out of memory"*|*bad_alloc*|*"Cannot allocate"*) st=oom ;;
+    *"input module is broken"*|*"error: "*) [ $rc != 0 ] && st=broken ;;
+  esac
+  echo "[abm-collect] $st $((SECONDS-start))s  $f" >&2
+  # one short write per line, so concurrent workers never interleave
+  printf '%s %s %s\n' "$st" "$((SECONDS-start))" "$f" >> "$MANIFEST"
 }
 export -f run_one
-export TIMEOUT SLICE_TO LOG EXTRA SECONDS
+export TIMEOUT SLICE_TO LOG EXTRA SECONDS MEM_MB MANIFEST
+
+# everything requested, minus what the manifest says is already done
+todo() {
+  { printf '%s\n' "$@"; [ -n "$LIST" ] && cat "$LIST"; } |
+    grep -v '^$' | awk 'FILENAME == ARGV[1] { done[$3] = 1; next } !($0 in done)' \
+      "$MANIFEST" -
+}
+mapfile -t FILES < <(todo "$@")
+echo "[abm-collect] ${#FILES[@]} file(s) to run" >&2
+set -- "${FILES[@]}"
+[ $# -eq 0 ] && exit 0
 
 if [ "$JOBS" -gt 1 ]; then
   printf '%s\n' "$@" | xargs -P "$JOBS" -I{} bash -c 'run_one "$@"' _ {} &

@@ -237,6 +237,16 @@ configure_file(
   "${PROJECT_BINARY_DIR}/abm-verify.py"
   COPYONLY
 )
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-isa.py"
+  "${PROJECT_BINARY_DIR}/abm-isa.py"
+  COPYONLY
+)
+configure_file(
+  "${PROJECT_SOURCE_DIR}/scripts/abm-report.py"
+  "${PROJECT_BINARY_DIR}/abm-report.py"
+  COPYONLY
+)
 
 if (NOT DEFINED TEST_NTHREADS)
   ProcessorCount(TEST_NTHREADS)
