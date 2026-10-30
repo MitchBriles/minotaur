@@ -1,4 +1,105 @@
-# Does mining affine bit-matrices find instructions worth adding?
+# Which fixed bit matrices deserve a hardwired instruction?
+
+The question here is narrower than "is a general bit-matrix instruction worth it" (round 1, below:
+mostly no). An instruction whose matrix is baked into the circuit needs no matrix operand: a
+permutation is only wires, an XOR-linear map a small XOR tree. Is there a specific matrix that
+programs compute often, on hot paths, at a cost of several instructions today?
+
+**Answer: two families pass every test.** MT19937's tempering and twist steps, and zigzag integer
+coding. The same ranking also puts SHA-2's Sigma functions at the top of the hot list, and RISC-V
+ratified exactly those eight matrices as single instructions in Zknh, which suggests the tests
+pick what ISA designers pick.
+
+## Tests
+
+1. **The same constants recur**: one exact matrix, matched by its function on bits, in many
+   unrelated projects (`abm-fixed-sigs.py`).
+2. **It runs on hot paths**: execution counts from profiled runs, as a share of every IR
+   instruction the program executed.
+3. **It is expensive today**: saves at least 2 instructions on some ISA, against the lower of
+   `llc -O2` and the ISA oracle (x86-64-v4, Armv9-A + SVE2-BITPERM, RVA23 + Zbb/Zbkb/Zbkx/Zbc/Zknh).
+4. **It is cheap in silicon**: at most two source registers, one result; gate count and depth of
+   the fixed circuit.
+
+## Data
+
+- **Static**: llvm-opt-benchmark (236 projects) plus 12 scalar builds, 40,801 files. Census with
+  `-minotaur-abm-census-all`, so every nested region is logged too: 4,351,638 sites, 106,489
+  distinct operations.
+- **Dynamic**: 296 LLVM test-suite benchmarks on their reference inputs, and 33 programs on their
+  own benchmarks or realistic inputs (compressors, image/audio/video codecs, crypto libraries,
+  CPython, QuickJS, GAP, Stockfish, SoftFloat, CRoaring, a RISC-V emulator), built twice through
+  `abm-pgo-cc` (`-fprofile-instr-generate`, then `-use`, scalar, line tables). The census logs each
+  site's execution count and each function's executed IR instructions. Recipes are in
+  `scripts/pgo-corpus/`.
+- **Proved**: 26,176 shortlisted regions checked with alive-tv; 102 refuted and dropped.
+
+## Contender 1: MT19937 temper and twist
+
+| | x86-64-v4 | Armv9-A | RVA23 | fixed |
+|---|---|---|---|---|
+| temper, 32-bit (clang -O2) | 14 | 9 | 13 | 1 |
+| temper, 64-bit | 17 | 13 | 19 | 1 |
+| twist, 32-bit: `(hi1(a) \| lo31(b)) >> 1 ^ (b&1 ? 0x9908b0df : 0)` | 9 | 8 | 12 | 1 |
+
+- 40 projects with an exact tempering matrix: 32 through libstdc++'s `std::mt19937` (whose
+  state is `uint_fast32_t`, 64 bits on Linux, so the matrix is 64 x 64) and `mt19937_64`, plus
+  hand-written versions in CPython, PHP, Ruby, OpenCV, Hyperscan and others. 201 of 341 sites in
+  loops.
+- GAP (`gapbs`, which seeds a generator per block): tempering is 1.4% of executed instructions on
+  x86 and AArch64, 2.4% on RISC-V; the twist runs 12.3 billion times against 238 billion
+  executed IR instructions. CPython's `random.random()`: 0.06% (interpreter overhead dominates).
+- Circuit: tempering is 59 XOR2 in 4 levels (97 for 64-bit); the twist is wires plus 15 (32)
+  AND-XOR pairs in one level.
+
+## Contender 2: zigzag encode and decode
+
+| | x86-64-v4 | Armv9-A | RVA23 | fixed |
+|---|---|---|---|---|
+| encode `(x << 1) ^ (x >> 63)` | 3 | 2 | 3 | 1 |
+| decode `(x >> 1) ^ -(x & 1)` | 5 | 2 | 4 | 1 |
+
+- 47 projects (protobuf, gRPC, RocksDB, DuckDB, Polars, FlatBuffers, Draco, meshoptimizer,
+  OpenEXR, FFmpeg, FLAC, Wireshark, Postgres, OpenJDK, QuickJS, 19 Rust crates); 468 of 875
+  sites in loops.
+- QuickJS: 2.2% of executed instructions (`get_sleb128`, decoding line tables while building
+  backtraces in its exception-heavy tests).
+- Circuit: 32 or 64 XOR2, one level. AArch64 already does both in two instructions (shifted
+  operand, `sbfx`), so the case is for x86 and RISC-V.
+
+## Validation: SHA-2 Sigma
+
+SHA-256/512 Sigma0/1 and sigma0/1 (XOR of three rotations) are the hottest fixed matrices in the
+profiled crypto code: up to 3.1% of all instructions in liboqs's SLH-DSA, hot in Monocypher and
+BearSSL. They cost 5 instructions on x86 and 3 on AArch64, and 1 on RISC-V, which ratified them
+as Zknh.
+
+## Near misses
+
+- **Morton spread/compress by 2 and 3**: 19-30 instructions on RISC-V, but in 6 projects and hot
+  only in libmorton's own benchmark; x86 has `pdep`/`pext`; Qualcomm's `qc.expand2/3` exists.
+- **Fill below the top bit** (`x |= x >> 1 ... >> 16`): 31 projects, 3,909 sites; compilers emit
+  5-10 instructions, but `0xFFFFFFFF >> clz(x)` in a 64-bit register is 2 on every ISA. A
+  compiler fix. Only the 64-bit form (6 projects) needs 3-4.
+- **RISC-V immediate decoding** (S/B/J): pure wiring, 8-18 instructions, 2-4% of a RISC-V
+  emulator's execution, but only emulators and toolchains (3 projects).
+- **UTF-8 field gathers** (`pext 0x1f3f` and kin): 75+ projects, 2-4 instructions, not hot.
+- **Bitsliced-AES nibble shuffles**: 13-19 instructions on x86/AArch64, one `xperm4` on RISC-V.
+- The oracle treats a nibble permutation as a generic shuffle; `xperm4`/`xperm8` with a constant
+  index register should be recognized (`abm-isa.py` gap).
+
+## Reproducing round 2
+
+```bash
+# on a big machine; see scripts/pgo-corpus/README.txt for the profiled corpus
+scripts/pgo-corpus/census-run.sh static.list runs/static 44      # census-all, llc, proofs, rank
+scripts/pgo-corpus/census-run.sh pgo.list runs/pgo 56
+scripts/abm-fixed-sigs.py scripts/abm-isa.py runs/static/fixed.json runs/pgo/fixed.json
+```
+
+---
+
+# Round 1: does a general affine bit-matrix instruction pay off?
 
 **Short answer: mostly no.** Measured over 39,614 files from 248 projects, affine bit manipulation
 is everywhere (2.9 million proved sites), but 94% of it already costs one or two instructions on

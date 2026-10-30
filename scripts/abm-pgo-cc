@@ -29,17 +29,16 @@ FLAGS=(-O2 -fno-vectorize -fno-slp-vectorize -gline-tables-only -Wno-error
        -Wno-profile-instr-missing -Wno-backend-plugin)
 
 # Configure-time probes (no input file, -E, -M, --version) go straight through.
-compile=0 out="" src="" have_use=0 prof_name=""
+out="" srcs=() have_use=0 prof_name=""
 args=("$@")
 for ((i = 0; i < ${#args[@]}; i++)); do
   case "${args[i]}" in
-    -c) compile=1 ;;
     -o) out=${args[i+1]} ;;
     -fprofile-instr-use=*|-fprofile-use=*)
       have_use=1
       prof_name=$(basename "${args[i]#*=}" .profdata) ;;
     -E|-M|-MM) exec "$CLANG" "$@" ;;
-    *.c|*.cc|*.cpp|*.cxx|*.C) src=${args[i]} ;;
+    *.c|*.cc|*.cpp|*.cxx|*.C) srcs+=("${args[i]}") ;;
   esac
 done
 
@@ -51,27 +50,29 @@ case "$ABM_PHASE" in
     [ $have_use = 0 ] && [ -n "$ABM_PROFDATA" ] &&
       use=(-fprofile-instr-use="$ABM_PROFDATA")
     "$CLANG" "$@" "${FLAGS[@]}" "${use[@]}" || exit
-    if [ $compile = 1 ] && [ -n "$src" ] && [ -n "$ABM_IRDIR" ]; then
-      [ -z "$out" ] && out=$(basename "${src%.*}").o
-      key=$(realpath -m "$out" | sha1sum | cut -c1-10)
+    # Every source this command compiles (with -c, or compiled and linked in
+    # one go) also becomes IR: the same flags, one source at a time.
+    if [ ${#srcs[@]} -gt 0 ] && [ -n "$ABM_IRDIR" ]; then
       proj=${ABM_PROJECT:-${prof_name:-unknown}}
       dir="$ABM_IRDIR/$proj"
       mkdir -p "$dir"
-      ll="$dir/$(basename "${src%.*}")-$key.ll"
-      # same command, IR instead of an object; the census reads source_filename
-      ir=()
-      for ((i = 0; i < ${#args[@]}; i++)); do
-        case "${args[i]}" in
-          -c) ;;
-          -o) i=$((i + 1)) ;;
-          -MD|-MMD) ;;
-          -MF|-MT|-MQ) i=$((i + 1)) ;;
-          *) ir+=("${args[i]}") ;;
-        esac
+      for src in "${srcs[@]}"; do
+        key=$(realpath -m "$PWD/${out:-a.out}/$src" | sha1sum | cut -c1-10)
+        ll="$dir/$(basename "${src%.*}")-$key.ll"
+        ir=()
+        for ((i = 0; i < ${#args[@]}; i++)); do
+          case "${args[i]}" in
+            -c|-MD|-MMD) ;;
+            -o|-MF|-MT|-MQ) i=$((i + 1)) ;;
+            -l*|-L*|-Wl,*|-static|-shared|-rdynamic) ;;
+            *.c|*.cc|*.cpp|*.cxx|*.C|*.o|*.a|*.so) ;;
+            *) ir+=("${args[i]}") ;;
+          esac
+        done
+        "$CLANG" "${ir[@]}" "$src" "${FLAGS[@]}" "${use[@]}" -S -emit-llvm \
+          -o "$ll" 2>/dev/null &&
+          sed -i "s|^source_filename = \"\(.*\)\"|source_filename = \"bench/$proj/pgo/\1\"|" "$ll"
       done
-      "$CLANG" "${ir[@]}" "${FLAGS[@]}" "${use[@]}" -S -emit-llvm -o "$ll" \
-        2>/dev/null &&
-        sed -i "s|^source_filename = \"\(.*\)\"|source_filename = \"bench/$proj/pgo/\1\"|" "$ll"
     fi
     exit 0 ;;
   *)

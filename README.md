@@ -311,3 +311,16 @@ matrix on x86-64, AArch64 and RISC-V by recognizing the families they implement
 directly; `abm-report.py` gives the class distribution, ISA coverage, what an
 ABM would save, and the residue. `abm-fetch-corpus.sh` and `abm-ext-corpus.sh`
 build the corpora. Results are in `FINDINGS.md`.
+
+To ask which *fixed* matrices would earn a hardwired instruction, rank each
+distinct operation by spread, hotness, cost today and circuit size:
+
+    abm-fixed.py --samples short.jsonl census.jsonl       # shortlist for llc/proofs
+    abm-fixed.py --llc llc.jsonl --verified proof.jsonl --json fixed.json census.jsonl
+    abm-fixed-sigs.py scripts/abm-isa.py fixed.json       # named operations
+
+Hotness comes from profiles: build a program twice with `abm-pgo-cc` as the
+compiler (`ABM_PHASE=gen`, run a workload, then `ABM_PHASE=use`) and the
+census logs each site's execution count and each function's executed IR
+instructions. `scripts/pgo-corpus/` holds the harness and the recipes for the
+profiled corpus.
