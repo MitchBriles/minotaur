@@ -17,7 +17,7 @@ namespace minotaur {
 void eliminate_dead_code(Function &F) {
   FunctionAnalysisManager FAM;
 
-  PassBuilder PB;
+  PassBuilder PB(F.getContext());
   PB.registerFunctionAnalyses(FAM);
 
   FunctionPassManager FPM;

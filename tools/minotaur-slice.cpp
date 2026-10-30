@@ -65,7 +65,7 @@ int main(int argc, char **argv) {
     if (F.isDeclaration())
       continue;
 
-    llvm::PassBuilder PB;
+    llvm::PassBuilder PB(Context);
     llvm::FunctionAnalysisManager FAM;
     PB.registerFunctionAnalyses(FAM);
 
