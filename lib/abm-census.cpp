@@ -597,6 +597,27 @@ string toHex(const APInt &V) {
   return string(S);
 }
 
+// Longest chain of dependent instructions from an input to the root, not
+// counting the casts and freezes that are free on every ISA. This is the
+// latency an ISA without a single instruction for the operation pays.
+unsigned critPath(const Region &R) {
+  vector<unsigned> D(R.Nodes.size(), 0);
+  unsigned Max = 0;
+  for (unsigned i = 0; i < R.Nodes.size(); ++i) {
+    const Node &N = R.Nodes[i];
+    unsigned In = 0;
+    for (auto &Op : N.Ops)
+      if (Op.K == Operand::Node)
+        In = max(In, D[Op.Idx]);
+    bool Free = N.Opcode == Instruction::ZExt ||
+                N.Opcode == Instruction::Trunc ||
+                N.Opcode == Instruction::Freeze;
+    D[i] = In + !Free;
+    Max = max(Max, D[i]);
+  }
+  return Max;
+}
+
 string opHistogram(const Region &R) {
   map<string, unsigned> H;
   for (auto *I : R.Insts) {
@@ -622,8 +643,19 @@ struct Found {
   unsigned TableBits = 0;
 };
 
+void writeLoc(raw_ostream &L, const Instruction *I) {
+  if (const DebugLoc &DL = I->getDebugLoc()) {
+    L << ",\"loc\":";
+    string S;
+    raw_string_ostream SS(S);
+    SS << DL->getFilename() << ':' << DL->getLine();
+    writeJSONString(L, SS.str());
+  }
+}
+
 void writeRecord(raw_ostream &OS, const Found &F, const LoopInfo &LI,
-                 const BlockFrequencyInfo *BFI, double EntryFreq) {
+                 const BlockFrequencyInfo *BFI, double EntryFreq,
+                 bool HasProfile) {
   const Region &R = F.R;
   unsigned Out = R.Root->getType()->getIntegerBitWidth();
   BasicBlock *BB = R.Root->getParent();
@@ -670,7 +702,13 @@ void writeRecord(raw_ostream &OS, const Found &F, const LoopInfo &LI,
     << opHistogram(R) << "\",\"grow\":\""
     << (R.G == Grow::Full ? "full" : "bitwise") << "\",\"depth\":" << R.Depth
     << ",\"loop_depth\":" << LI.getLoopDepth(BB)
-    << ",\"rel_freq\":" << llvm::format("%.6g", Freq);
+    << ",\"rel_freq\":" << llvm::format("%.6g", Freq)
+    << ",\"crit\":" << critPath(R);
+  // executions in a profiled run (clang -fprofile-instr-use)
+  if (HasProfile)
+    if (auto C = BFI->getBlockProfileCount(BB))
+      L << ",\"count\":" << *C;
+  writeLoc(L, R.Root);
   if (F.A)
     L << ",\"evidence\":\"basis+" << F.A->Samples << "-samples\"";
   L << ",\"function\":";
@@ -805,13 +843,40 @@ unsigned runABMCensus(Function &F, const LoopInfo &LI, const DominatorTree &DT,
   OS.SetUnbuffered();
   double EntryFreq =
       BFI ? (double)BFI->getEntryFreq().getFrequency() : 0.0;
+  bool HasProfile = BFI && F.getEntryCount().has_value();
   unsigned N = 0;
   for (auto &Fd : Results) {
     // a table nested in a larger affine region is part of that operation
     if (!O.log_subsumed && Covered.count(Fd.R.Root) && !Fd.A)
       continue;
-    writeRecord(OS, Fd, LI, BFI, EntryFreq);
+    writeRecord(OS, Fd, LI, BFI, EntryFreq, HasProfile);
     ++N;
+  }
+
+  // With a profile, the function's dynamic IR instruction count, so a site's
+  // executions can be read as a share of everything the program executed.
+  if (HasProfile) {
+    uint64_t Dyn = 0, Static = 0;
+    for (BasicBlock &B : F) {
+      uint64_t Size = 0;
+      for (Instruction &I : B)
+        Size += !isa<PHINode>(I);
+      Static += Size;
+      if (auto C = BFI->getBlockProfileCount(&B))
+        Dyn += *C * Size;
+    }
+    string Line;
+    raw_string_ostream L(Line);
+    L << "{\"kind\":\"func\",\"insts\":" << Static << ",\"dyn_insts\":" << Dyn
+      << ",\"entry_count\":" << *F.getEntryCount()
+      << ",\"function\":";
+    writeJSONString(L, config::current_function);
+    L << ",\"source\":";
+    writeJSONString(L, config::current_source);
+    L << "}\n";
+    L.flush();
+    OS << Line;
+    OS.flush();
   }
   return N;
 }
