@@ -1,0 +1,79 @@
+#!/bin/bash
+# Copyright (c) 2020-present, author: Zhengyang Liu (liuz@cs.utah.edu).
+# Distributed under the MIT license that can be found in the LICENSE file.
+#
+# A CC/CXX wrapper for building profiled census corpora. Name it as the
+# compiler (abm-pgo-c++, a symlink, for C++) and build the project twice:
+#
+#   ABM_PHASE=gen  instrumented build (-fprofile-instr-generate); run the
+#                  workload with LLVM_PROFILE_FILE=DIR/%m-%p.profraw, then
+#                  llvm-profdata merge -o prof.profdata DIR/*.profraw
+#   ABM_PHASE=use  rebuild with ABM_PROFDATA=prof.profdata (unless the build
+#                  passes its own -fprofile-instr-use); every -c compile also
+#                  writes its optimized IR, with the profile's counts, to
+#                  ABM_IRDIR/<ABM_PROJECT>/. Without ABM_PROJECT, the project
+#                  is the name of the build's own .profdata file, as with the
+#                  LLVM test-suite's TEST_SUITE_PROFILE_USE (one per benchmark).
+#
+# Both phases compile scalar code (-O2 -fno-vectorize -fno-slp-vectorize),
+# because the census only sees scalar integer operations, and keep line
+# tables so each site can be traced back to its source line.
+
+CLANG=${ABM_CLANG:-clang}
+case "$0" in
+  *++) CLANG=${ABM_CLANGXX:-${CLANG}++} ;;
+esac
+
+FLAGS=(-O2 -fno-vectorize -fno-slp-vectorize -gline-tables-only -Wno-error
+       -Wno-profile-instr-unprofiled -Wno-profile-instr-out-of-date
+       -Wno-profile-instr-missing -Wno-backend-plugin)
+
+# Configure-time probes (no input file, -E, -M, --version) go straight through.
+compile=0 out="" src="" have_use=0 prof_name=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+  case "${args[i]}" in
+    -c) compile=1 ;;
+    -o) out=${args[i+1]} ;;
+    -fprofile-instr-use=*|-fprofile-use=*)
+      have_use=1
+      prof_name=$(basename "${args[i]#*=}" .profdata) ;;
+    -E|-M|-MM) exec "$CLANG" "$@" ;;
+    *.c|*.cc|*.cpp|*.cxx|*.C) src=${args[i]} ;;
+  esac
+done
+
+case "$ABM_PHASE" in
+  gen)
+    exec "$CLANG" "$@" "${FLAGS[@]}" -fprofile-instr-generate ;;
+  use)
+    use=()
+    [ $have_use = 0 ] && [ -n "$ABM_PROFDATA" ] &&
+      use=(-fprofile-instr-use="$ABM_PROFDATA")
+    "$CLANG" "$@" "${FLAGS[@]}" "${use[@]}" || exit
+    if [ $compile = 1 ] && [ -n "$src" ] && [ -n "$ABM_IRDIR" ]; then
+      [ -z "$out" ] && out=$(basename "${src%.*}").o
+      key=$(realpath -m "$out" | sha1sum | cut -c1-10)
+      proj=${ABM_PROJECT:-${prof_name:-unknown}}
+      dir="$ABM_IRDIR/$proj"
+      mkdir -p "$dir"
+      ll="$dir/$(basename "${src%.*}")-$key.ll"
+      # same command, IR instead of an object; the census reads source_filename
+      ir=()
+      for ((i = 0; i < ${#args[@]}; i++)); do
+        case "${args[i]}" in
+          -c) ;;
+          -o) i=$((i + 1)) ;;
+          -MD|-MMD) ;;
+          -MF|-MT|-MQ) i=$((i + 1)) ;;
+          *) ir+=("${args[i]}") ;;
+        esac
+      done
+      "$CLANG" "${ir[@]}" "${FLAGS[@]}" "${use[@]}" -S -emit-llvm -o "$ll" \
+        2>/dev/null &&
+        sed -i "s|^source_filename = \"\(.*\)\"|source_filename = \"bench/$proj/pgo/\1\"|" "$ll"
+    fi
+    exit 0 ;;
+  *)
+    exec "$CLANG" "$@" ;;
+esac
